@@ -1,4 +1,5 @@
 import type { Status } from './engine.ts';
+import type { SpeciesInfo } from './species.ts';
 
 /**
  * Single reactive bridge between the vanilla simulation core and the Svelte UI.
@@ -11,7 +12,8 @@ export const ui = $state({
   seed: 0,
   menuOpen: false,
   counts: [] as number[],
-  creatureCounts: [] as number[],
+  species: [] as SpeciesInfo[],
+  selectedSpecies: null as number | null,
   coverage: [] as number[],
   biomeShare: [] as number[],
   season: 'Spring' as string,

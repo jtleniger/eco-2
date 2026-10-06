@@ -1,37 +1,73 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GRID, H, MAX_CREATURES, REGEN_SAMPLES_PER_TICK, SEASON_AMPLITUDE, SEASON_PERIOD_TICKS, W } from './config.ts';
+import {
+  GRID,
+  H,
+  MAX_CREATURES,
+  MAX_SPECIES,
+  REGEN_SAMPLES_PER_TICK,
+  SEASON_AMPLITUDE,
+  SEASON_PERIOD_TICKS,
+  W,
+} from './config.ts';
 import { seasonName, seasonOffset } from './climate.ts';
 import { Population, spawnInitialCreatures } from './creatures.ts';
 import { computeEligibleCells, regrowTick } from './food.ts';
-import { Biome, FOODS, FOOD_COUNT, NONE } from './palette.ts';
+import { GENE_COUNT, GENES, classMaskOf, mutate } from './genetics.ts';
+import { Biome, FOODS, FOOD_COUNT, NONE, hexToRgb } from './palette.ts';
 import { mulberry32 } from './rng.ts';
-import {
-  SPECIES,
-  SPECIES_COUNT,
-  SPECIES_EATS,
-  SPECIES_HUNTS,
-  SPECIES_LUT,
-  SPECIES_PASSABLE,
-} from './species.ts';
+import { FOUNDERS, SPECIES_PALETTE_LUT, SpeciesRegistry } from './species.ts';
 import { classify, generateTerrain } from './terrain.ts';
 import { World } from './world.ts';
 
-/** Every live slot is well formed and the occupant grid agrees with the slots. */
-function assertPopulationSound(pop: Population, biome: Uint8Array): void {
+/** A registry with all four founders registered and an empty population to go with it. */
+function founderPop(): { pop: Population; registry: SpeciesRegistry } {
+  const registry = new SpeciesRegistry();
+  for (let s = 0; s < FOUNDERS.length; s++) registry.addFounder(FOUNDERS[s], s);
+  return { pop: new Population(), registry };
+}
+
+/** Spawn founder `s` at `cell` with the founder's reference genome. */
+function spawnFounder(
+  pop: Population,
+  registry: SpeciesRegistry,
+  s: number,
+  cell: number,
+  energy: number,
+): number {
+  return pop.spawn(cell, energy, s, registry.colorSlot[s], registry.refOf(s), registry);
+}
+
+/**
+ * Every live slot is well formed and the occupant grid agrees with the slots.
+ *
+ * Note: standing on a biome the individual's `biomeMask` excludes is NOT a violation. The
+ * mask gates movement, so a categorical mutation at birth, or a climate shift under a
+ * creature, can legitimately strand a live creature on ground it can no longer re-enter.
+ * Placement of freshly seeded creatures is checked against the species reference mask in the
+ * spawn-placement test instead.
+ */
+function assertPopulationSound(pop: Population, registry: SpeciesRegistry): void {
   let sum = 0;
-  for (let s = 0; s < SPECIES_COUNT; s++) sum += pop.counts[s];
-  assert.equal(sum, pop.count, 'counts must sum to count');
+  for (let s = 0; s < MAX_SPECIES; s++) sum += pop.speciesCounts[s];
+  assert.equal(sum, pop.count, 'speciesCounts must sum to count');
   for (let i = 0; i < pop.count; i++) {
-    assert.ok(pop.species[i] < SPECIES_COUNT, `slot ${i} species in range`);
+    assert.ok(pop.species[i] < registry.count, `slot ${i} species in range`);
     assert.ok(pop.pos[i] >= 0 && pop.pos[i] < GRID, `slot ${i} pos in range`);
     assert.equal(pop.dead[i], 0, `slot ${i} is not a zombie`);
     assert.equal(
-      SPECIES_PASSABLE[pop.species[i]][biome[pop.pos[i]]],
-      1,
-      `slot ${i} stands on a passable biome`,
+      pop.cls[i],
+      classMaskOf(pop.foodMask[i], pop.preyMask[i]),
+      `slot ${i} trophic class matches its masks`,
     );
+    for (let g = 0; g < GENE_COUNT; g++) {
+      const v = pop.genes[i * GENE_COUNT + g];
+      assert.ok(
+        v >= GENES[g].min - 0.01 && v <= GENES[g].max + 0.01,
+        `slot ${i} gene ${g} within [${GENES[g].min}, ${GENES[g].max}], got ${v}`,
+      );
+    }
   }
   for (let c = 0; c < GRID; c++) {
     const j = pop.occupant[c];
@@ -58,29 +94,59 @@ function assertFoodCountsMatch(food: Uint8Array, counts: Uint32Array): void {
   );
 }
 
-test('species tables describe the SPECIES list', () => {
-  for (let s = 0; s < SPECIES_COUNT; s++) {
-    const sp = SPECIES[s];
-    const n = parseInt(sp.hex.slice(1), 16);
+test('founder registry describes FOUNDERS', () => {
+  const registry = new SpeciesRegistry();
+  FOUNDERS.forEach((spec, s) => registry.addFounder(spec, s));
+  assert.equal(registry.count, FOUNDERS.length);
+  for (let s = 0; s < FOUNDERS.length; s++) {
+    const spec = FOUNDERS[s];
+    assert.equal(registry.name[s], spec.name);
+    assert.equal(registry.colorSlot[s], s);
+    assert.equal(registry.parent[s], -1);
+    assert.equal(registry.generation[s], 0);
+    assert.equal(registry.extinctTick[s], -1);
+    assert.equal(registry.maxPop[s], spec.maxPop);
+    // Trait order must match the GENE order in genetics.ts.
+    const traits = [
+      spec.vision,
+      spec.speed,
+      spec.moveChance,
+      spec.metabolism,
+      spec.maxEnergy,
+      spec.reproEnergy,
+      spec.maxAge,
+      spec.eatGain,
+      spec.startEnergy,
+      spec.tempMin,
+      spec.tempMax,
+      spec.comfortMin,
+      spec.comfortMax,
+    ];
+    for (let g = 0; g < GENE_COUNT; g++) {
+      assert.ok(
+        Math.abs(registry.refGenes[s][g] - traits[g]) < 1e-5,
+        `${spec.name} gene ${g}: ${registry.refGenes[s][g]} != ${traits[g]}`,
+      );
+    }
+    let biomeMask = 0;
+    for (const b of spec.biomes) biomeMask |= 1 << b;
+    assert.equal(registry.refBiome[s], biomeMask, `${spec.name} biome mask`);
+    let foodMask = 0;
+    for (const f of spec.foods) foodMask |= 1 << f;
+    assert.equal(registry.refFood[s], foodMask, `${spec.name} food mask`);
+    let preyMask = 0;
+    for (const c of spec.preyClasses) preyMask |= c;
+    assert.equal(registry.refPrey[s], preyMask, `${spec.name} prey mask`);
+    const [r, g, b] = hexToRgb(spec.hex);
     assert.deepEqual(
-      [SPECIES_LUT[s * 3], SPECIES_LUT[s * 3 + 1], SPECIES_LUT[s * 3 + 2]],
-      [(n >> 16) & 255, (n >> 8) & 255, n & 255],
-      `${sp.name} LUT colour`,
+      [
+        SPECIES_PALETTE_LUT[registry.colorSlot[s] * 3],
+        SPECIES_PALETTE_LUT[registry.colorSlot[s] * 3 + 1],
+        SPECIES_PALETTE_LUT[registry.colorSlot[s] * 3 + 2],
+      ],
+      [r, g, b],
+      `${spec.name} palette colour`,
     );
-    for (let b = 0; b < sp.biomes.length; b++) {
-      assert.equal(SPECIES_PASSABLE[s][sp.biomes[b]], 1, `${sp.name} may occupy biome ${b}`);
-    }
-    assert.equal(
-      SPECIES_PASSABLE[s].reduce((a, b2) => a + b2, 0),
-      sp.biomes.length,
-      `${sp.name} has no extra biomes`,
-    );
-    for (let f = 0; f < FOOD_COUNT; f++) {
-      assert.equal(SPECIES_EATS[s][f], sp.foods.includes(f as never) ? 1 : 0, `${sp.name} diet ${f}`);
-    }
-    for (let p = 0; p < SPECIES_COUNT; p++) {
-      assert.equal(SPECIES_HUNTS[s][p], sp.prey.includes(p as never) ? 1 : 0, `${sp.name} prey ${p}`);
-    }
   }
 });
 
@@ -95,18 +161,21 @@ test('a pike runs down a minnow it can see', () => {
       foodCounts[0]++;
     }
   }
-  const pop = new Population();
+  const { pop, registry } = founderPop();
   const tempBase = new Float32Array(GRID).fill(0.5);
-  assert.ok(pop.spawn(3, 100 * W + 100, SPECIES[3].startEnergy), 'pike spawned');
-  assert.ok(pop.spawn(1, 106 * W + 100, SPECIES[1].startEnergy), 'minnow spawned');
+  assert.ok(spawnFounder(pop, registry, 3, 100 * W + 100, FOUNDERS[3].startEnergy) >= 0, 'pike spawned');
+  assert.ok(
+    spawnFounder(pop, registry, 1, 106 * W + 100, FOUNDERS[1].startEnergy) >= 0,
+    'minnow spawned',
+  );
 
   let ticks = 0;
-  while (pop.counts[1] > 0 && ticks < 200) {
-    pop.step(biome, food, foodCounts, rng, tempBase, 0);
+  while (pop.speciesCounts[1] > 0 && ticks < 200) {
+    pop.step(biome, food, foodCounts, rng, tempBase, 0, registry, ticks);
     ticks++;
   }
-  assert.equal(pop.counts[1], 0, `minnow killed within ${ticks} ticks`);
-  assert.ok(pop.counts[3] >= 1, 'pike survived the hunt');
+  assert.equal(pop.speciesCounts[1], 0, `minnow killed within ${ticks} ticks`);
+  assert.ok(pop.speciesCounts[3] >= 1, 'pike survived the hunt');
   assert.deepEqual(assertFoodCountsMatch(food, foodCounts), undefined);
 });
 
@@ -115,10 +184,19 @@ test('herbivores eat the plants they stand on and the counters keep up', () => {
   world.reset(12345);
   for (let t = 0; t < 60; t++) world.step();
   assertFoodCountsMatch(world.food, world.counts);
-  world.population.step(world.biome, world.food, world.counts, world.rng, world.tempBase, world.seasonOffset);
+  world.population.step(
+    world.biome,
+    world.food,
+    world.counts,
+    world.rng,
+    world.tempBase,
+    world.seasonOffset,
+    world.registry,
+    world.tick,
+  );
   regrowTick(world.biome, world.food, world.counts, world.rng, REGEN_SAMPLES_PER_TICK);
   assertFoodCountsMatch(world.food, world.counts);
-  assertPopulationSound(world.population, world.biome);
+  assertPopulationSound(world.population, world.registry);
 });
 
 test('a seed reproduces the same run', () => {
@@ -126,7 +204,11 @@ test('a seed reproduces the same run', () => {
     const w = new World();
     w.reset(4242);
     for (let t = 0; t < 300; t++) w.step();
-    return { counts: Array.from(w.counts), creatures: Array.from(w.population.counts), tick: w.tick };
+    return {
+      counts: Array.from(w.counts),
+      species: Array.from(w.population.speciesCounts),
+      tick: w.tick,
+    };
   };
   assert.deepEqual(run(), run());
 });
@@ -137,45 +219,52 @@ test('creature populations stay bounded by their caps', () => {
   for (let t = 0; t < 1500; t++) {
     world.step();
     assert.ok(world.population.count <= MAX_CREATURES, 'total within pool capacity');
-    for (let s = 0; s < SPECIES_COUNT; s++) {
-      assert.ok(world.population.counts[s] <= SPECIES[s].maxPop, `${SPECIES[s].name} within maxPop`);
+    for (let s = 0; s < world.registry.count; s++) {
+      assert.ok(
+        world.population.speciesCounts[s] <= world.registry.maxPop[s],
+        `${world.registry.name[s]} within maxPop`,
+      );
     }
   }
-  assertPopulationSound(world.population, world.biome);
+  assertPopulationSound(world.population, world.registry);
   assertFoodCountsMatch(world.food, world.counts);
 });
 
 test('spawn placement respects biomes, occupancy and the pool limit', () => {
   const terrain = generateTerrain(12345);
   const biome = terrain.biome;
-  const pop = new Population();
-  spawnInitialCreatures(biome, pop, mulberry32(5));
-  assertPopulationSound(pop, biome);
-  for (let s = 0; s < SPECIES_COUNT; s++) {
-    assert.ok(pop.counts[s] <= SPECIES[s].initial, `${SPECIES[s].name} seeded at most initial`);
+  const { pop, registry } = founderPop();
+  spawnInitialCreatures(biome, pop, registry, mulberry32(5));
+  assertPopulationSound(pop, registry);
+  for (let i = 0; i < pop.count; i++) {
+    assert.equal(
+      (registry.refBiome[pop.species[i]] >>> biome[pop.pos[i]]) & 1,
+      1,
+      `slot ${i} seeded on a biome its species allows`,
+    );
   }
-  const tiny = new Population(4);
-  const rng = mulberry32(11);
-  spawnInitialCreatures(biome, tiny, rng);
-  assert.equal(tiny.count, 4, 'stops at pool capacity');
-  assert.equal(tiny.spawn(0, 0, 10), false, 'spawn refuses when full');
+  for (let s = 0; s < FOUNDERS.length; s++) {
+    assert.ok(pop.speciesCounts[s] <= FOUNDERS[s].initial, `${FOUNDERS[s].name} seeded at most initial`);
+  }
+  const tinyPool = new Population(4);
+  const tinyRegistry = new SpeciesRegistry();
+  for (let s = 0; s < FOUNDERS.length; s++) tinyRegistry.addFounder(FOUNDERS[s], s);
+  spawnInitialCreatures(biome, tinyPool, tinyRegistry, mulberry32(11));
+  assert.equal(tinyPool.count, 4, 'stops at pool capacity');
+  assert.equal(spawnFounder(tinyPool, tinyRegistry, 0, 0, 10), -1, 'spawn refuses when full');
 });
 
-test('all four species survive 5000 ticks and the world keeps its books', () => {
+test('the ecosystem survives 5000 ticks', () => {
   for (const seed of [12345, 1]) {
     const world = new World();
     world.reset(seed);
     for (let t = 0; t < 5000; t++) world.step();
-    const counts = Array.from(world.population.counts);
-    assert.ok(
-      counts.every((c) => c >= 1),
-      `seed ${seed}: every species alive at tick 5000, got ${counts.join('/')}`,
-    );
-    counts.forEach((c, s) =>
-      assert.ok(c <= SPECIES[s].maxPop, `seed ${seed}: ${SPECIES[s].name} within maxPop`),
-    );
+    assert.ok(world.population.count > 0, `seed ${seed}: population survives 5000 ticks`);
+    let sum = 0;
+    for (let s = 0; s < MAX_SPECIES; s++) sum += world.population.speciesCounts[s];
+    assert.equal(sum, world.population.count, `seed ${seed}: speciesCounts sum to count`);
     assert.ok(world.population.count <= MAX_CREATURES);
-    assertPopulationSound(world.population, world.biome);
+    assertPopulationSound(world.population, world.registry);
     assertFoodCountsMatch(world.food, world.counts);
   }
 });
@@ -186,7 +275,7 @@ test('grazing is replenished, not drained away from the grazers', () => {
   const stocked = new World();
   stocked.reset(7);
   stocked.population.count = 0;
-  stocked.population.counts.fill(0);
+  stocked.population.speciesCounts.fill(0);
   stocked.population.occupant.fill(-1);
 
   for (let t = 0; t < SEASON_PERIOD_TICKS; t++) {
@@ -209,8 +298,8 @@ test('grazing is replenished, not drained away from the grazers', () => {
   );
   // The crop eaten by herbivores has to come back where they are, not somewhere else: their
   // stored energy is what drains away when it does not.
-  for (let s = 0; s < SPECIES_COUNT; s++) {
-    if (SPECIES[s].foods.length === 0) continue;
+  for (let s = 0; s < FOUNDERS.length; s++) {
+    if (FOUNDERS[s].foods.length === 0) continue;
     let sum = 0;
     let n = 0;
     for (let i = 0; i < grazed.population.count; i++) {
@@ -218,10 +307,10 @@ test('grazing is replenished, not drained away from the grazers', () => {
       sum += grazed.population.energy[i];
       n++;
     }
-    assert.ok(n > 0, `${SPECIES[s].name} is still alive`);
+    assert.ok(n > 0, `${FOUNDERS[s].name} is still alive`);
     assert.ok(
-      sum / n > SPECIES[s].maxEnergy * 0.4,
-      `${SPECIES[s].name} stays fed (mean energy ${(sum / n).toFixed(0)})`,
+      sum / n > FOUNDERS[s].maxEnergy * 0.4,
+      `${FOUNDERS[s].name} stays fed (mean energy ${(sum / n).toFixed(0)})`,
     );
   }
 });
@@ -299,14 +388,14 @@ test('a creature outside its comfort band moves toward a better temperature', ()
   const food = new Uint8Array(GRID).fill(NONE);
   const counts = new Uint32Array(FOOD_COUNT);
   const tempBase = new Float32Array(GRID).fill(0.5);
-  const pop = new Population();
+  const { pop, registry } = founderPop();
   const start = 100 * W + 100;
   tempBase[start] = 0.85; // inside the Grazer's survival band, above its comfort band
-  assert.ok(pop.spawn(0, start, SPECIES[0].startEnergy), 'grazer spawned');
+  assert.ok(spawnFounder(pop, registry, 0, start, FOUNDERS[0].startEnergy) >= 0, 'grazer spawned');
 
-  pop.step(biome, food, counts, mulberry32(3), tempBase, 0);
+  pop.step(biome, food, counts, mulberry32(3), tempBase, 0, registry, 0);
 
-  assert.equal(pop.counts[0], 1, 'grazer survives the step');
+  assert.equal(pop.speciesCounts[0], 1, 'grazer survives the step');
   assert.notEqual(pop.pos[0], start, 'grazer left the hot cell');
   assert.ok(tempBase[pop.pos[0]] < 0.85, 'grazer stepped somewhere cooler');
 });
@@ -316,13 +405,132 @@ test('a creature outside its survival band dies', () => {
   const food = new Uint8Array(GRID).fill(NONE);
   const counts = new Uint32Array(FOOD_COUNT);
   const tempBase = new Float32Array(GRID).fill(0.5);
-  const pop = new Population();
+  const { pop, registry } = founderPop();
   const start = 50 * W + 50;
   tempBase[start] = 2; // far above the Grazer's survival maximum (1.08)
-  assert.ok(pop.spawn(0, start, SPECIES[0].startEnergy), 'grazer spawned');
+  assert.ok(spawnFounder(pop, registry, 0, start, FOUNDERS[0].startEnergy) >= 0, 'grazer spawned');
 
-  pop.step(biome, food, counts, mulberry32(3), tempBase, 0);
+  pop.step(biome, food, counts, mulberry32(3), tempBase, 0, registry, 0);
 
-  assert.equal(pop.counts[0], 0, 'grazer died of heat');
+  assert.equal(pop.speciesCounts[0], 0, 'grazer died of heat');
   assert.equal(pop.count, 0);
+});
+
+test('mutation respects gene bounds and changes the genome', () => {
+  const registry = new SpeciesRegistry();
+  for (let s = 0; s < FOUNDERS.length; s++) registry.addFounder(FOUNDERS[s], s);
+  const scratch = new Float32Array(GENE_COUNT);
+  scratch.set(registry.refGenes[0]);
+  const masks = {
+    biomeMask: registry.refBiome[0],
+    foodMask: registry.refFood[0],
+    preyMask: registry.refPrey[0],
+  };
+  mutate(scratch, 0, masks, mulberry32(1));
+
+  let changed = 0;
+  for (let g = 0; g < GENE_COUNT; g++) {
+    assert.ok(
+      scratch[g] >= GENES[g].min - 0.01 && scratch[g] <= GENES[g].max + 0.01,
+      `mutated gene ${g} stays within bounds, got ${scratch[g]}`,
+    );
+    if (scratch[g] !== registry.refGenes[0][g]) changed++;
+  }
+  assert.ok(changed > 0, 'mutation changes at least one gene for seed 1');
+});
+
+test('a distant genome founds a new species', () => {
+  const registry = new SpeciesRegistry();
+  for (let s = 0; s < FOUNDERS.length; s++) registry.addFounder(FOUNDERS[s], s);
+
+  const genes = new Float32Array(GENE_COUNT);
+  genes.set(registry.refGenes[0]);
+  for (let g = 0; g < GENE_COUNT; g++) genes[g] = GENES[g].max;
+  const distant = {
+    genes,
+    off: 0,
+    biomeMask: registry.refBiome[0],
+    foodMask: registry.refFood[0],
+    preyMask: registry.refPrey[0],
+  };
+  const id = registry.classify(distant, 0, 0, 0);
+  assert.ok(id >= FOUNDERS.length, `distant genome founds a new species, got ${id}`);
+  assert.equal(registry.parent[id], 0, 'child of Grazer');
+  assert.ok(registry.name[id].startsWith('Grazer'), `named after its parent: ${registry.name[id]}`);
+  assert.equal(registry.generation[id], 1);
+  assert.equal(registry.maxPop[id], FOUNDERS[0].maxPop);
+
+  const same = {
+    genes: registry.refGenes[0],
+    off: 0,
+    biomeMask: registry.refBiome[0],
+    foodMask: registry.refFood[0],
+    preyMask: registry.refPrey[0],
+  };
+  assert.equal(registry.classify(same, 0, 0, 0), 0, 'an unchanged genome stays in its species');
+});
+
+test('distant genomes do not mate', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Water);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+
+  const { pop, registry } = founderPop();
+  const start = 100 * W + 100;
+  assert.ok(spawnFounder(pop, registry, 0, start, FOUNDERS[0].startEnergy) >= 0, 'grazer spawned');
+  assert.ok(
+    spawnFounder(pop, registry, 3, start + 1, FOUNDERS[3].startEnergy) >= 0,
+    'pike spawned',
+  );
+  let max = 0;
+  for (let t = 0; t < 50; t++) {
+    pop.step(biome, food, counts, mulberry32(100 + t), tempBase, 0, registry, t);
+    max = Math.max(max, pop.count);
+  }
+  assert.ok(max <= 2, `opposite genomes never mate, peak population ${max}`);
+  assert.equal(registry.count, FOUNDERS.length, 'no offspring species was founded');
+
+  const pair = founderPop();
+  assert.ok(spawnFounder(pair.pop, pair.registry, 0, start, FOUNDERS[0].startEnergy) >= 0);
+  assert.ok(spawnFounder(pair.pop, pair.registry, 0, start + 1, FOUNDERS[0].startEnergy) >= 0);
+  for (let t = 0; t < 50 && pair.pop.count < 3; t++) {
+    pair.pop.step(biome, food, counts, mulberry32(200 + t), tempBase, 0, pair.registry, t);
+  }
+  assert.ok(pair.pop.count >= 3, `compatible neighbours reproduce, population ${pair.pop.count}`);
+});
+
+test('speciation actually happens', () => {
+  const world = new World();
+  world.reset(12345);
+  let firstTick = -1;
+  for (let t = 0; t < 12000; t++) {
+    world.step();
+    if (firstTick < 0 && world.registry.count > FOUNDERS.length) firstTick = world.tick;
+  }
+  console.log(
+    `speciation: first new species at tick ${firstTick}, ${world.registry.count} species after ${world.tick} ticks (seed 12345)`,
+  );
+  assert.ok(
+    world.registry.count > FOUNDERS.length,
+    `at least one new species after 12000 ticks, got ${world.registry.count}`,
+  );
+  for (let s = 0; s < world.registry.count; s++) {
+    assert.ok(world.population.speciesCounts[s] >= 0, `species ${s} live count valid`);
+    assert.ok(world.registry.name[s].length > 0, `species ${s} named`);
+  }
+});
+
+test('extinction is recorded', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  assert.ok(spawnFounder(pop, registry, 0, 100 * W + 100, 1) >= 0, 'grazer spawned');
+  for (let t = 0; t < 50 && pop.count > 0; t++) {
+    pop.step(biome, food, counts, mulberry32(t), tempBase, 0, registry, t);
+  }
+  assert.equal(pop.speciesCounts[0], 0, 'the lone grazer starved');
+  assert.ok(registry.extinctTick[0] >= 0, `extinction tick recorded, got ${registry.extinctTick[0]}`);
 });

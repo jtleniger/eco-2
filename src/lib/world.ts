@@ -4,6 +4,7 @@ import { Population, spawnInitialCreatures } from './creatures.ts';
 import { computeEligibleCells, regrowTick, spawnInitialFood } from './food.ts';
 import { FOODS_BY_BIOME, FOOD_COUNT, NONE } from './palette.ts';
 import { mulberry32 } from './rng.ts';
+import { FOUNDERS, SpeciesRegistry } from './species.ts';
 import { classify, generateTerrain } from './terrain.ts';
 
 /**
@@ -20,6 +21,8 @@ export class World {
   counts: Uint32Array = new Uint32Array(FOOD_COUNT);
   eligible: Uint32Array = new Uint32Array(FOOD_COUNT);
   population = new Population();
+  /** Every species ever created in this run; founders pre-registered on `reset`. */
+  registry = new SpeciesRegistry();
   rng: () => number = mulberry32(1);
   seed = 0;
   tick = 0;
@@ -46,7 +49,9 @@ export class World {
     this.rng = mulberry32(this.seed ^ 0x9e3779b9);
     spawnInitialFood(this.biome, this.food, this.counts, this.rng);
     this.population = new Population();
-    spawnInitialCreatures(this.biome, this.population, this.rng);
+    this.registry = new SpeciesRegistry();
+    for (let s = 0; s < FOUNDERS.length; s++) this.registry.addFounder(FOUNDERS[s], s);
+    spawnInitialCreatures(this.biome, this.population, this.registry, this.rng);
   }
 
   /**
@@ -64,6 +69,8 @@ export class World {
       this.rng,
       this.tempBase,
       this.seasonOffset,
+      this.registry,
+      this.tick,
     );
     regrowTick(this.biome, this.food, this.counts, this.rng, REGEN_SAMPLES_PER_TICK);
     this.tick++;

@@ -1,4 +1,14 @@
-import { BIOME_COUNT, Biome, Food, FOOD_COUNT, hexToRgb, type Ids } from './palette.ts';
+import { MAX_SPECIES, SPECIATION_DISTANCE } from './config.ts';
+import {
+  GENE,
+  GENE_COUNT,
+  type GenomeSource,
+  TROPHIC_CARNIVORE,
+  TROPHIC_HERBIVORE,
+  geneDistance,
+  writeGene,
+} from './genetics.ts';
+import { BIOMES, BIOME_COUNT, Biome, FOODS, FOOD_COUNT, Food, hexToRgb } from './palette.ts';
 
 const LAND = [
   Biome.Beach,
@@ -10,31 +20,46 @@ const LAND = [
   Biome.Snow,
 ] as const;
 
-/** Single source of truth for the four creature species; index === species id. DO NOT reorder. */
-export const SPECIES = [
-  // Field meanings, all read verbatim by `creatures.ts`:
-  //   biomes     biomes the species may occupy
-  //   foods      food ids it eats off the ground
-  //   prey       species ids it hunts
-  //   vision     search radius in cells (disk)
-  //   speed      cells it may move toward a target per tick
-  //   moveChance probability of a random step when it has no target
-  //   metabolism energy lost per tick
-  //   maxEnergy  energy cap
-  //   reproEnergy energy needed to split
-  //   maxAge     ticks before old-age death
-  //   eatGain    energy per meal
-  //   startEnergy energy at spawn
-  //   initial    individuals at world reset
-  //   maxPop     live cap for this species
-  //   tempMin/tempMax       normalized temperature [0,1]+season the species dies outside of
-  //   comfortMin/comfortMax normalized temperature band it seeks when outside
+/** The heritable, continuous part of a creature's genome, in plain-object form. */
+export interface SpeciesTraits {
+  vision: number;
+  speed: number;
+  moveChance: number;
+  metabolism: number;
+  maxEnergy: number;
+  reproEnergy: number;
+  maxAge: number;
+  eatGain: number;
+  startEnergy: number;
+  tempMin: number;
+  tempMax: number;
+  comfortMin: number;
+  comfortMax: number;
+}
+
+/** A founder lineage: its traits plus the categorical genes and initial population. */
+export interface FounderSpec extends SpeciesTraits {
+  name: string;
+  hex: string;
+  biomes: readonly number[];
+  foods: readonly number[];
+  /** Trophic class bits it hunts (`TROPHIC_*`). */
+  preyClasses: readonly number[];
+  initial: number;
+  maxPop: number;
+}
+
+/**
+ * The only four founder lineages; every genome in the world descends from these. Values are
+ * the original hand-tuned species, unchanged, and carry zero genetic variance.
+ */
+export const FOUNDERS: readonly FounderSpec[] = [
   {
     name: 'Grazer',
     hex: '#ffff00',
     biomes: LAND,
     foods: [Food.CactusFruit, Food.Grain, Food.Berries, Food.Mushroom, Food.Lichen],
-    prey: [],
+    preyClasses: [],
     vision: 6,
     speed: 1,
     moveChance: 0.8,
@@ -56,7 +81,7 @@ export const SPECIES = [
     hex: '#00f0ff',
     biomes: [Biome.Water],
     foods: [Food.Algae],
-    prey: [],
+    preyClasses: [],
     vision: 6,
     speed: 1,
     moveChance: 0.9,
@@ -78,7 +103,7 @@ export const SPECIES = [
     hex: '#ff1a1a',
     biomes: LAND,
     foods: [],
-    prey: [0], // prey ids are species indices: 0 = Grazer
+    preyClasses: [TROPHIC_HERBIVORE],
     vision: 8,
     speed: 2,
     moveChance: 1,
@@ -100,7 +125,7 @@ export const SPECIES = [
     hex: '#ff00ff',
     biomes: [Biome.Water],
     foods: [],
-    prey: [1], // 1 = Minnow
+    preyClasses: [TROPHIC_HERBIVORE],
     vision: 8,
     speed: 2,
     moveChance: 1,
@@ -117,42 +142,210 @@ export const SPECIES = [
     comfortMin: 0.42,
     comfortMax: 0.85,
   },
-] as const;
+];
 
-export const SPECIES_COUNT = SPECIES.length;
+/** Write every trait of `traits` into the genome row at `off`. */
+export function writeTraits(genes: Float32Array, off: number, traits: SpeciesTraits): void {
+  writeGene(genes, off, GENE.vision, traits.vision);
+  writeGene(genes, off, GENE.speed, traits.speed);
+  writeGene(genes, off, GENE.moveChance, traits.moveChance);
+  writeGene(genes, off, GENE.metabolism, traits.metabolism);
+  writeGene(genes, off, GENE.maxEnergy, traits.maxEnergy);
+  writeGene(genes, off, GENE.reproEnergy, traits.reproEnergy);
+  writeGene(genes, off, GENE.maxAge, traits.maxAge);
+  writeGene(genes, off, GENE.eatGain, traits.eatGain);
+  writeGene(genes, off, GENE.startEnergy, traits.startEnergy);
+  writeGene(genes, off, GENE.tempMin, traits.tempMin);
+  writeGene(genes, off, GENE.tempMax, traits.tempMax);
+  writeGene(genes, off, GENE.comfortMin, traits.comfortMin);
+  writeGene(genes, off, GENE.comfortMax, traits.comfortMax);
+}
 
-export type SpeciesId = Ids<typeof SPECIES>;
+function hslToHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(255 * c)
+      .toString(16)
+      .padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
 
-/** `SPECIES_COUNT * 3` bytes: RGB per species id. */
-export const SPECIES_LUT = new Uint8Array(SPECIES_COUNT * 3);
+/** The four founder colours, then 20 generated ones; species take a slot, never a derived hex. */
+export const SPECIES_PALETTE: readonly string[] = [
+  ...FOUNDERS.map((f) => f.hex),
+  ...Array.from({ length: 20 }, (_, i) => hslToHex((i / 20) * 360, 0.85, 0.6)),
+];
+export const SPECIES_PALETTE_COUNT = SPECIES_PALETTE.length;
 
-/** Entry `s` = `[biome] -> 0/1`; which biomes species `s` may occupy. */
-export const SPECIES_PASSABLE: readonly Uint8Array[] = [];
-/** Entry `s` = `[food] -> 0/1`; which foods species `s` eats off the ground. */
-export const SPECIES_EATS: readonly Uint8Array[] = [];
-/** Entry `s` = `[species] -> 0/1`; which species `s` hunts. */
-export const SPECIES_HUNTS: readonly Uint8Array[] = [];
+/** `SPECIES_PALETTE_COUNT * 3` bytes: RGB per colour slot, `NONE = 255` stays free. */
+export const SPECIES_PALETTE_LUT = new Uint8Array(SPECIES_PALETTE_COUNT * 3);
+for (let i = 0; i < SPECIES_PALETTE_COUNT; i++) {
+  const [r, g, b] = hexToRgb(SPECIES_PALETTE[i]);
+  SPECIES_PALETTE_LUT[i * 3] = r;
+  SPECIES_PALETTE_LUT[i * 3 + 1] = g;
+  SPECIES_PALETTE_LUT[i * 3 + 2] = b;
+}
 
-const passableLists = SPECIES_PASSABLE as Uint8Array[];
-const eatsLists = SPECIES_EATS as Uint8Array[];
-const huntsLists = SPECIES_HUNTS as Uint8Array[];
+/** UI-facing snapshot of one species; `pushSpecies` rebuilds these from the registry. */
+export interface SpeciesInfo {
+  id: number;
+  name: string;
+  hex: string;
+  live: number;
+  peak: number;
+  maxPop: number;
+  founderTick: number;
+  extinctTick: number;
+  parentName: string | null;
+  generation: number;
+  diet: string;
+  habitat: string;
+  prey: string;
+  traits: SpeciesTraits;
+}
 
-for (let s = 0; s < SPECIES_COUNT; s++) {
-  const sp = SPECIES[s];
-  const [r, g, b] = hexToRgb(sp.hex);
-  SPECIES_LUT[s * 3] = r;
-  SPECIES_LUT[s * 3 + 1] = g;
-  SPECIES_LUT[s * 3 + 2] = b;
+/** Names of the biomes a `biomeMask` allows, or `none`. */
+export function habitatLabel(mask: number): string {
+  const names: string[] = [];
+  for (let b = 0; b < BIOME_COUNT; b++) if ((mask >>> b) & 1) names.push(BIOMES[b].name);
+  return names.length ? names.join(', ') : 'none';
+}
 
-  const passable = new Uint8Array(BIOME_COUNT);
-  for (const biome of sp.biomes as readonly number[]) passable[biome] = 1;
-  passableLists.push(passable);
+/** Names of the foods a `foodMask` allows, or `—`. */
+export function dietLabel(mask: number): string {
+  const names: string[] = [];
+  for (let f = 0; f < FOOD_COUNT; f++) if ((mask >>> f) & 1) names.push(FOODS[f].name);
+  return names.length ? names.join(', ') : '—';
+}
 
-  const eats = new Uint8Array(FOOD_COUNT);
-  for (const food of sp.foods as readonly number[]) eats[food] = 1;
-  eatsLists.push(eats);
+/** The trophic classes a `preyMask` hunts, e.g. `herbivores`, or `''`. */
+export function preyLabel(mask: number): string {
+  const names: string[] = [];
+  if (mask & TROPHIC_HERBIVORE) names.push('herbivores');
+  if (mask & TROPHIC_CARNIVORE) names.push('carnivores');
+  return names.join(', ');
+}
 
-  const hunts = new Uint8Array(SPECIES_COUNT);
-  for (const prey of sp.prey as readonly number[]) hunts[prey] = 1;
-  huntsLists.push(hunts);
+/**
+ * Bookkeeping for every species ever created: ids are dense and never reused. Founder i is
+ * registered by `addFounder`; a genome far enough from both parents founds a new id via
+ * `classify`. Each species keeps one reference genome, the anchor its descendants are
+ * measured against.
+ */
+export class SpeciesRegistry {
+  count = 0;
+  readonly name: string[] = [];
+  /** Parent species id, `-1` for a founder. */
+  readonly parent: number[] = [];
+  readonly colorSlot: number[] = [];
+  readonly founderTick: number[] = [];
+  /** `-1` while alive, else the tick its live count hit zero. */
+  readonly extinctTick: number[] = [];
+  readonly peak: number[] = [];
+  readonly maxPop: number[] = [];
+  readonly generation: number[] = [];
+  readonly refGenes: Float32Array[] = [];
+  readonly refBiome: number[] = [];
+  readonly refFood: number[] = [];
+  readonly refPrey: number[] = [];
+
+  /** Register founder `index` (0..FOUNDERS.length-1) at species id `index`. */
+  addFounder(spec: FounderSpec, index: number): void {
+    const genes = new Float32Array(GENE_COUNT);
+    writeTraits(genes, 0, spec);
+    let biomeMask = 0;
+    for (const b of spec.biomes) biomeMask |= 1 << b;
+    let foodMask = 0;
+    for (const f of spec.foods) foodMask |= 1 << f;
+    let preyMask = 0;
+    for (const c of spec.preyClasses) preyMask |= c;
+
+    this.name[index] = spec.name;
+    this.parent[index] = -1;
+    this.colorSlot[index] = index;
+    this.founderTick[index] = 0;
+    this.extinctTick[index] = -1;
+    this.peak[index] = 0;
+    this.maxPop[index] = spec.maxPop;
+    this.generation[index] = 0;
+    this.refGenes[index] = genes;
+    this.refBiome[index] = biomeMask;
+    this.refFood[index] = foodMask;
+    this.refPrey[index] = preyMask;
+    if (index >= this.count) this.count = index + 1;
+  }
+
+  /** Found a new species descended from `parentId`, copying `src` as its reference genome. */
+  addChild(src: GenomeSource, parentId: number, tick: number): number {
+    const id = this.count++;
+    let ordinal = 2;
+    for (let s = 0; s < id; s++) if (this.parent[s] === parentId) ordinal++;
+    const genes = new Float32Array(GENE_COUNT);
+    for (let g = 0; g < GENE_COUNT; g++) genes[g] = src.genes[src.off + g];
+
+    this.name[id] = `${this.name[parentId]} ${ordinal}`;
+    this.parent[id] = parentId;
+    this.colorSlot[id] = 4 + ((id - 4) % (SPECIES_PALETTE_COUNT - 4));
+    this.founderTick[id] = tick;
+    this.extinctTick[id] = -1;
+    this.peak[id] = 0;
+    this.maxPop[id] = this.maxPop[parentId];
+    this.generation[id] = this.generation[parentId] + 1;
+    this.refGenes[id] = genes;
+    this.refBiome[id] = src.biomeMask;
+    this.refFood[id] = src.foodMask;
+    this.refPrey[id] = src.preyMask;
+    return id;
+  }
+
+  /** A view onto species `id`'s reference genome. Allocates; not for the per-creature path. */
+  refOf(id: number): GenomeSource {
+    return {
+      genes: this.refGenes[id],
+      off: 0,
+      biomeMask: this.refBiome[id],
+      foodMask: this.refFood[id],
+      preyMask: this.refPrey[id],
+    };
+  }
+
+  private distanceTo(src: GenomeSource, id: number): number {
+    return geneDistance(
+      src.genes,
+      src.off,
+      src.biomeMask,
+      src.foodMask,
+      src.preyMask,
+      this.refGenes[id],
+      0,
+      this.refBiome[id],
+      this.refFood[id],
+      this.refPrey[id],
+    );
+  }
+
+  /**
+   * Assign a newborn genome to a species: `parentA` when it is still close enough to it,
+   * else `parentB`, else a new species. Once `MAX_SPECIES` is reached, the nearest existing
+   * species is used instead (ties go to the lowest id).
+   */
+  classify(src: GenomeSource, parentA: number, parentB: number, tick: number): number {
+    if (this.distanceTo(src, parentA) <= SPECIATION_DISTANCE) return parentA;
+    if (parentB !== parentA && this.distanceTo(src, parentB) <= SPECIATION_DISTANCE) return parentB;
+    if (this.count < MAX_SPECIES) return this.addChild(src, parentA, tick);
+
+    let best = parentA;
+    let bestD = this.distanceTo(src, parentA);
+    for (let s = 0; s < this.count; s++) {
+      const d = this.distanceTo(src, s);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best;
+  }
 }

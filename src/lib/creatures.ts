@@ -1,25 +1,53 @@
-import { GRID, H, MAX_CREATURES, MIN_HABITAT_AREA, W } from './config.ts';
+import {
+  GRID,
+  H,
+  MATING_ENERGY_FRACTION,
+  MATING_RADIUS,
+  MAX_CREATURES,
+  MAX_SPECIES,
+  MIN_HABITAT_AREA,
+  SPECIATION_DISTANCE,
+  W,
+} from './config.ts';
 import { NONE } from './palette.ts';
 import {
-  SPECIES,
-  SPECIES_COUNT,
-  SPECIES_EATS,
-  SPECIES_HUNTS,
-  SPECIES_PASSABLE,
-  type SpeciesId,
-} from './species.ts';
+  GENE,
+  GENE_COUNT,
+  type GenomeSource,
+  type Masks,
+  classMaskOf,
+  crossover,
+  geneDistance,
+  mutate,
+} from './genetics.ts';
+import { FOUNDERS, SpeciesRegistry } from './species.ts';
 
 /**
  * Creature agents in a fixed-capacity slot pool. Every array is preallocated, so a tick
- * allocates nothing. DOM-free: usable from a headless harness.
+ * allocates nothing. Behaviour is read from each individual's own genome, so lineages drift;
+ * DOM-free: usable from a headless harness.
  */
 export class Population {
   readonly capacity: number;
   count: number;
-  /** Live count per species. */
-  readonly counts: Uint32Array;
+  /** Live count per species id (`MAX_SPECIES` entries). */
+  readonly speciesCounts: Uint32Array;
   /** slot -> species id */
-  readonly species: Uint8Array;
+  readonly species: Uint32Array;
+  /** slot -> species colour slot */
+  readonly color: Uint8Array;
+  /** `capacity * GENE_COUNT` floats: the genome of each slot. */
+  readonly genes: Float32Array;
+  /** slot -> bit `b` set when the creature may stand on biome `b`. */
+  readonly biomeMask: Uint16Array;
+  /** slot -> bit `f` set when the creature eats food `f`. */
+  readonly foodMask: Uint16Array;
+  /** slot -> trophic class bits it hunts (`TROPHIC_*`). */
+  readonly preyMask: Uint8Array;
+  /** slot -> `classMaskOf(foodMask, preyMask)`. */
+  readonly cls: Uint8Array;
+  /** slot -> 1 once it has mated this tick. */
+  readonly mated: Uint8Array;
   /** slot -> cell index (`y * W + x`) */
   readonly pos: Int32Array;
   readonly energy: Float32Array;
@@ -29,11 +57,21 @@ export class Population {
   /** cell -> slot index | -1 (last writer wins) */
   readonly occupant: Int32Array;
 
+  /** Reused offspring genome; never read outside `mate`. */
+  private readonly genesScratch = new Float32Array(GENE_COUNT);
+
   constructor(capacity: number = MAX_CREATURES) {
     this.capacity = capacity;
     this.count = 0;
-    this.counts = new Uint32Array(SPECIES_COUNT);
-    this.species = new Uint8Array(capacity);
+    this.speciesCounts = new Uint32Array(MAX_SPECIES);
+    this.species = new Uint32Array(capacity);
+    this.color = new Uint8Array(capacity);
+    this.genes = new Float32Array(capacity * GENE_COUNT);
+    this.biomeMask = new Uint16Array(capacity);
+    this.foodMask = new Uint16Array(capacity);
+    this.preyMask = new Uint8Array(capacity);
+    this.cls = new Uint8Array(capacity);
+    this.mated = new Uint8Array(capacity);
     this.pos = new Int32Array(capacity);
     this.energy = new Float32Array(capacity);
     this.age = new Uint32Array(capacity);
@@ -41,28 +79,85 @@ export class Population {
     this.occupant = new Int32Array(GRID).fill(-1);
   }
 
-  /** Create one individual at cell `at`. Returns `false` when the pool is full. */
-  spawn(s: SpeciesId, at: number, energy: number): boolean {
-    if (this.count === this.capacity) return false;
+  /**
+   * Create one individual at cell `at` from genome `src`, crediting `registry`'s peak.
+   * Returns the slot index, or `-1` when the pool is full.
+   */
+  spawn(
+    at: number,
+    energy: number,
+    speciesId: number,
+    colorSlot: number,
+    src: GenomeSource,
+    registry: SpeciesRegistry,
+  ): number {
+    if (this.count === this.capacity) return -1;
     const i = this.count;
-    this.species[i] = s;
+    const o = i * GENE_COUNT;
+    for (let g = 0; g < GENE_COUNT; g++) this.genes[o + g] = src.genes[src.off + g];
+    this.biomeMask[i] = src.biomeMask;
+    this.foodMask[i] = src.foodMask;
+    this.preyMask[i] = src.preyMask;
+    this.cls[i] = classMaskOf(src.foodMask, src.preyMask);
+    this.color[i] = colorSlot;
+    this.species[i] = speciesId;
     this.pos[i] = at;
     this.energy[i] = energy;
     this.age[i] = 0;
     this.dead[i] = 0;
+    this.mated[i] = 0;
     this.occupant[at] = i;
-    this.counts[s]++;
+    const live = ++this.speciesCounts[speciesId];
+    if (live === 1) registry.extinctTick[speciesId] = -1;
+    if (live > registry.peak[speciesId]) registry.peak[speciesId] = live;
     this.count = i + 1;
-    return true;
+    return i;
   }
 
-  /** Swap-remove slot `i`, patching up the occupant grid for both moved cells. */
-  private remove(i: number): void {
+  /** Distance from the offspring genome left in `genesScratch` to the genome of live slot `k`. */
+  private childDistance(k: number, masks: Masks): number {
+    return geneDistance(
+      this.genesScratch,
+      0,
+      masks.biomeMask,
+      masks.foodMask,
+      masks.preyMask,
+      this.genes,
+      k * GENE_COUNT,
+      this.biomeMask[k],
+      this.foodMask[k],
+      this.preyMask[k],
+    );
+  }
+
+  /** A view onto slot `k`'s genome. Allocates; only used on the mating path. */
+  private srcOf(k: number): GenomeSource {
+    return {
+      genes: this.genes,
+      off: k * GENE_COUNT,
+      biomeMask: this.biomeMask[k],
+      foodMask: this.foodMask[k],
+      preyMask: this.preyMask[k],
+    };
+  }
+
+  /** Swap-remove slot `i`, patching the occupant grid and recording extinction in `registry`. */
+  private remove(i: number, registry: SpeciesRegistry, tick: number): void {
     const last = this.count - 1;
-    this.counts[this.species[i]]--;
+    const s = this.species[i];
+    if (--this.speciesCounts[s] === 0) registry.extinctTick[s] = tick;
     if (this.occupant[this.pos[i]] === i) this.occupant[this.pos[i]] = -1;
     if (i !== last) {
+      const oi = i * GENE_COUNT;
+      const ol = last * GENE_COUNT;
+      this.genes.copyWithin(oi, ol, ol + GENE_COUNT);
+      this.biomeMask[i] = this.biomeMask[last];
+      this.foodMask[i] = this.foodMask[last];
+      this.preyMask[i] = this.preyMask[last];
+      this.cls[i] = this.cls[last];
+      this.color[i] = this.color[last];
       this.species[i] = this.species[last];
+      this.mated[i] = this.mated[last];
       this.pos[i] = this.pos[last];
       this.energy[i] = this.energy[last];
       this.age[i] = this.age[last];
@@ -71,6 +166,23 @@ export class Population {
     }
     this.dead[last] = 0;
     this.count = last;
+  }
+
+  /**
+   * Move live slot `k` into `speciesId`, keeping the per-species counters, colour and peak in
+   * step, and recording the extinction of the species it leaves behind. Called when a birth
+   * founds a species: both parents join it, so the daughter lineage starts as a breeding pair
+   * (or more) instead of a single member that can never reproduce.
+   */
+  private adopt(k: number, speciesId: number, registry: SpeciesRegistry, tick: number): void {
+    const old = this.species[k];
+    if (old === speciesId) return;
+    if (--this.speciesCounts[old] === 0) registry.extinctTick[old] = tick;
+    this.species[k] = speciesId;
+    this.color[k] = registry.colorSlot[speciesId];
+    const live = ++this.speciesCounts[speciesId];
+    if (live === 1) registry.extinctTick[speciesId] = -1;
+    if (live > registry.peak[speciesId]) registry.peak[speciesId] = live;
   }
 
   /** Relocate slot `i`; returns the occupant slot it displaced, or `-1`. */
@@ -82,12 +194,16 @@ export class Population {
     return prev === i ? -1 : prev;
   }
 
-  /** Nearest visible food (herbivore) or prey (predator) cell, or `-1`. */
+  /**
+   * Nearest visible food (herbivore) or prey (predator) cell, or `-1`. A creature with both
+   * dietary masks set searches for food but still eats prey it lands on.
+   */
   private findTarget(i: number, biome: Uint8Array, food: Uint8Array): number {
-    const s = this.species[i];
-    const sp = SPECIES[s];
-    const vision = sp.vision;
-    const herbivore = sp.foods.length > 0;
+    const o = i * GENE_COUNT;
+    const vision = this.genes[o + GENE.vision];
+    const foodMask = this.foodMask[i];
+    const preyMask = this.preyMask[i];
+    const biomeMask = this.biomeMask[i];
     const cx = this.pos[i] % W;
     const cy = (this.pos[i] / W) | 0;
     let best = -1;
@@ -102,15 +218,21 @@ export class Population {
         const x = cx + dx;
         if (x < 0 || x >= W) continue;
         const cell = y * W + x;
-        if (herbivore) {
+        if (foodMask !== 0) {
           const f = food[cell];
-          if (f !== NONE && SPECIES_EATS[s][f] === 1) {
+          if (f !== NONE && ((foodMask >>> f) & 1) === 1) {
             best = cell;
             bestD = d2;
           }
         } else {
           const j = this.occupant[cell];
-          if (j >= 0 && j !== i && !this.dead[j] && SPECIES_HUNTS[s][this.species[j]] === 1) {
+          if (
+            j >= 0 &&
+            j !== i &&
+            !this.dead[j] &&
+            (preyMask & this.cls[j]) !== 0 &&
+            ((biomeMask >>> biome[this.pos[j]]) & 1) === 1
+          ) {
             best = cell;
             bestD = d2;
           }
@@ -125,7 +247,7 @@ export class Population {
    * and `(0, dy)`, skipping duplicates. `-1` when each candidate is out of bounds or impassable.
    */
   private stepToward(i: number, target: number, biome: Uint8Array): number {
-    const s = this.species[i];
+    const biomeMask = this.biomeMask[i];
     const here = this.pos[i];
     const hx = here % W;
     const hy = (here / W) | 0;
@@ -141,22 +263,22 @@ export class Population {
       const y = hy + oy;
       if (x < 0 || x >= W || y < 0 || y >= H) continue;
       const cell = y * W + x;
-      if (SPECIES_PASSABLE[s][biome[cell]] === 1) return cell;
+      if (((biomeMask >>> biome[cell]) & 1) === 1) return cell;
     }
     return -1;
   }
 
   /** Single random step; `-1` when the drawn cell is out of bounds or impassable. */
   private randomStep(i: number, biome: Uint8Array, rng: () => number): number {
-    const ox = (rng() * 3 | 0) - 1;
-    const oy = (rng() * 3 | 0) - 1;
+    const ox = ((rng() * 3) | 0) - 1;
+    const oy = ((rng() * 3) | 0) - 1;
     if (ox === 0 && oy === 0) return -1;
     const here = this.pos[i];
     const x = (here % W) + ox;
     const y = ((here / W) | 0) + oy;
     if (x < 0 || x >= W || y < 0 || y >= H) return -1;
     const cell = y * W + x;
-    return SPECIES_PASSABLE[this.species[i]][biome[cell]] === 1 ? cell : -1;
+    return ((this.biomeMask[i] >>> biome[cell]) & 1) === 1 ? cell : -1;
   }
 
   /**
@@ -170,7 +292,7 @@ export class Population {
     tempOffset: number,
     center: number,
   ): number {
-    const passable = SPECIES_PASSABLE[this.species[i]];
+    const biomeMask = this.biomeMask[i];
     const here = this.pos[i];
     const hx = here % W;
     const hy = (here / W) | 0;
@@ -184,7 +306,7 @@ export class Population {
         const x = hx + dx;
         if (x < 0 || x >= W) continue;
         const c = y * W + x;
-        if (passable[biome[c]] !== 1) continue;
+        if (((biomeMask >>> biome[c]) & 1) !== 1) continue;
         const d = Math.abs(tempBase[c] + tempOffset - center);
         if (d < bestD) {
           bestD = d;
@@ -200,27 +322,137 @@ export class Population {
    * `displaced` — the creature whose occupant entry this tick's move overwrote.
    */
   private eat(i: number, food: Uint8Array, foodCounts: Uint32Array, displaced: number): void {
-    const s = this.species[i];
-    const sp = SPECIES[s];
+    const o = i * GENE_COUNT;
     const cell = this.pos[i];
+    const foodMask = this.foodMask[i];
 
-    if (sp.foods.length > 0) {
+    if (foodMask !== 0) {
       const f = food[cell];
-      if (f !== NONE && SPECIES_EATS[s][f] === 1) {
+      if (f !== NONE && ((foodMask >>> f) & 1) === 1) {
         foodCounts[f]--;
         food[cell] = NONE;
-        this.energy[i] = Math.min(sp.maxEnergy, this.energy[i] + sp.eatGain);
+        this.energy[i] = Math.min(
+          this.genes[o + GENE.maxEnergy],
+          this.energy[i] + this.genes[o + GENE.eatGain],
+        );
       }
     }
 
-    if (sp.prey.length > 0) {
+    const preyMask = this.preyMask[i];
+    if (preyMask !== 0) {
       let j = this.occupant[cell];
       if (j < 0 || j === i) j = displaced;
-      if (j >= 0 && j !== i && !this.dead[j] && SPECIES_HUNTS[s][this.species[j]] === 1) {
+      if (j >= 0 && j !== i && !this.dead[j] && (preyMask & this.cls[j]) !== 0) {
         this.dead[j] = 1; // swept later; never remove another slot mid-loop
-        this.energy[i] = Math.min(sp.maxEnergy, this.energy[i] + sp.eatGain);
+        this.energy[i] = Math.min(
+          this.genes[o + GENE.maxEnergy],
+          this.energy[i] + this.genes[o + GENE.eatGain],
+        );
       }
     }
+  }
+
+  /**
+   * Chebyshev window of radius `MATING_RADIUS` around slot `i`, scanning `dy` then `dx`
+   * ascending: the first compatible, willing neighbour, or `-1`. Deterministic, no `rng`.
+   */
+  private findMate(i: number, registry: SpeciesRegistry): number {
+    const here = this.pos[i];
+    const cx = here % W;
+    const cy = (here / W) | 0;
+    const oi = i * GENE_COUNT;
+    for (let dy = -MATING_RADIUS; dy <= MATING_RADIUS; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= H) continue;
+      for (let dx = -MATING_RADIUS; dx <= MATING_RADIUS; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= W) continue;
+        const j = this.occupant[y * W + x];
+        if (j < 0 || j === i || this.dead[j] || this.mated[j]) continue;
+        const oj = j * GENE_COUNT;
+        if (this.energy[j] < this.genes[oj + GENE.reproEnergy] * MATING_ENERGY_FRACTION) continue;
+        const sj = this.species[j];
+        if (this.speciesCounts[sj] >= registry.maxPop[sj]) continue;
+        const d = geneDistance(
+          this.genes,
+          oi,
+          this.biomeMask[i],
+          this.foodMask[i],
+          this.preyMask[i],
+          this.genes,
+          oj,
+          this.biomeMask[j],
+          this.foodMask[j],
+          this.preyMask[j],
+        );
+        if (d <= SPECIATION_DISTANCE) return j;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Sexual reproduction: recombine and mutate the two genomes, split both parents' energy,
+   * classify the child (possibly founding a species), and spawn it next to `i`.
+   */
+  private mate(
+    i: number,
+    j: number,
+    biome: Uint8Array,
+    registry: SpeciesRegistry,
+    tick: number,
+    rng: () => number,
+  ): void {
+    if (this.count === this.capacity) return; // cannot happen: the caller checked
+    const masks: Masks = crossover(this.genesScratch, this.srcOf(i), this.srcOf(j), rng);
+    mutate(this.genesScratch, 0, masks, rng);
+    const src: GenomeSource = {
+      genes: this.genesScratch,
+      off: 0,
+      biomeMask: masks.biomeMask,
+      foodMask: masks.foodMask,
+      preyMask: masks.preyMask,
+    };
+    const childEnergy = Math.min(
+      (this.energy[i] + this.energy[j]) * 0.5,
+      this.genesScratch[GENE.maxEnergy],
+    );
+    this.energy[i] *= 0.5;
+    this.energy[j] *= 0.5;
+    // A newborn that can still breed with a parent joins that parent's species even when the
+    // species' reference genome has drifted away from it; only a child too far from both
+    // parents to breed with either is reproductively isolated enough to found a species.
+    const speciesA = this.species[i];
+    const speciesB = this.species[j];
+    let speciesId: number;
+    let founded = false;
+    if (this.childDistance(i, masks) <= SPECIATION_DISTANCE) {
+      speciesId = speciesA;
+    } else if (this.childDistance(j, masks) <= SPECIATION_DISTANCE) {
+      speciesId = speciesB;
+    } else {
+      const before = registry.count;
+      speciesId = registry.classify(src, speciesA, speciesB, tick);
+      founded = registry.count > before;
+    }
+    if (founded) {
+      // A one-member species can never reproduce, so the isolated newborn takes both parents
+      // with it as the daughter species' founding pair.
+      this.adopt(i, speciesId, registry, tick);
+      this.adopt(j, speciesId, registry, tick);
+    }
+    const at = this.randomStep(i, biome, rng);
+    const slot = this.spawn(
+      at >= 0 ? at : this.pos[i],
+      childEnergy,
+      speciesId,
+      registry.colorSlot[speciesId],
+      src,
+      registry,
+    );
+    this.mated[i] = 1;
+    this.mated[j] = 1;
+    if (slot >= 0) this.mated[slot] = 1;
   }
 
   /** Advance every live creature one tick: age, starve, move, eat, reproduce. */
@@ -231,32 +463,37 @@ export class Population {
     rng: () => number,
     tempBase: Float32Array,
     tempOffset: number,
+    registry: SpeciesRegistry,
+    tick: number,
   ): void {
+    this.mated.fill(0, 0, this.count);
     let i = 0;
     while (i < this.count) {
       if (this.dead[i]) {
-        this.remove(i);
+        this.remove(i, registry, tick);
         continue;
       }
+      const o = i * GENE_COUNT;
       const s = this.species[i];
-      const sp = SPECIES[s];
       this.age[i]++;
-      this.energy[i] -= sp.metabolism;
-      if (this.energy[i] <= 0 || this.age[i] >= sp.maxAge) {
+      this.energy[i] -= this.genes[o + GENE.metabolism];
+      if (this.energy[i] <= 0 || this.age[i] >= this.genes[o + GENE.maxAge]) {
         this.dead[i] = 1;
-        this.remove(i);
+        this.remove(i, registry, tick);
         continue;
       }
 
       const temp = tempBase[this.pos[i]] + tempOffset;
-      if (temp < sp.tempMin || temp > sp.tempMax) {
+      const comfortMin = this.genes[o + GENE.comfortMin];
+      const comfortMax = this.genes[o + GENE.comfortMax];
+      if (temp < this.genes[o + GENE.tempMin] || temp > this.genes[o + GENE.tempMax]) {
         this.dead[i] = 1;
-        this.remove(i);
+        this.remove(i, registry, tick);
         continue;
       }
 
-      const center = (sp.comfortMin + sp.comfortMax) / 2;
-      const distressed = temp < sp.comfortMin || temp > sp.comfortMax;
+      const center = (comfortMin + comfortMax) / 2;
+      const distressed = temp < comfortMin || temp > comfortMax;
       let displaced = -1;
       if (distressed) {
         // Out of its preferred band: one step toward a better temperature, ignoring food/prey.
@@ -264,7 +501,9 @@ export class Population {
         if (to < 0) to = this.randomStep(i, biome, rng);
         if (to >= 0) displaced = this.move(i, to);
       } else {
-        for (let n = 0; n < sp.speed; n++) {
+        const speed = this.genes[o + GENE.speed];
+        const moveChance = this.genes[o + GENE.moveChance];
+        for (let n = 0; n < speed; n++) {
           const target = this.findTarget(i, biome, food);
           if (target >= 0 && target !== this.pos[i]) {
             let to = this.stepToward(i, target, biome);
@@ -273,7 +512,7 @@ export class Population {
               const d = this.move(i, to);
               if (n === 0 || d >= 0) displaced = d;
             }
-          } else if (n === 0 && rng() < sp.moveChance) {
+          } else if (n === 0 && rng() < moveChance) {
             const to = this.randomStep(i, biome, rng);
             if (to >= 0) displaced = this.move(i, to);
           } else if (n > 0) {
@@ -285,32 +524,35 @@ export class Population {
       this.eat(i, food, foodCounts, displaced);
 
       if (
-        this.energy[i] >= sp.reproEnergy &&
-        this.counts[s] < sp.maxPop &&
+        this.energy[i] >= this.genes[o + GENE.reproEnergy] * MATING_ENERGY_FRACTION &&
+        !this.mated[i] &&
+        this.speciesCounts[s] < registry.maxPop[s] &&
         this.count < this.capacity
       ) {
-        const to = this.randomStep(i, biome, rng);
-        const child = this.energy[i] / 2;
-        this.energy[i] = child;
-        this.spawn(s as SpeciesId, to >= 0 ? to : this.pos[i], child);
+        const j = this.findMate(i, registry);
+        if (j >= 0) this.mate(i, j, biome, registry, tick, rng);
       }
       i++;
     }
 
     i = 0;
     while (i < this.count) {
-      if (this.dead[i]) this.remove(i);
+      if (this.dead[i]) this.remove(i, registry, tick);
       else i++;
     }
   }
 }
 
-/** Habitat cell counts for species `s`: 0 on impassable cells, else its component's size. */
-function habitatAreas(biome: Uint8Array, s: number, area: Int32Array, members: Int32Array): Int32Array {
-  const passable = SPECIES_PASSABLE[s];
+/** Habitat cell counts for a passability mask: 0 on impassable cells, else its component size. */
+function habitatAreas(
+  biome: Uint8Array,
+  passableMask: number,
+  area: Int32Array,
+  members: Int32Array,
+): Int32Array {
   area.fill(0);
   for (let start = 0; start < GRID; start++) {
-    if (area[start] !== 0 || passable[biome[start]] !== 1) continue;
+    if (area[start] !== 0 || ((passableMask >>> biome[start]) & 1) !== 1) continue;
     let top = 0;
     let count = 0;
     area[start] = -1;
@@ -326,7 +568,7 @@ function habitatAreas(biome: Uint8Array, s: number, area: Int32Array, members: I
           const nx = x + dx;
           if (nx < 0 || nx >= W) continue;
           const n = ny * W + nx;
-          if (area[n] !== 0 || passable[biome[n]] !== 1) continue;
+          if (area[n] !== 0 || ((passableMask >>> biome[n]) & 1) !== 1) continue;
           area[n] = -1;
           members[count++] = n;
         }
@@ -338,24 +580,32 @@ function habitatAreas(biome: Uint8Array, s: number, area: Int32Array, members: I
 }
 
 /**
- * Place `SPECIES[s].initial` individuals of each species on random unoccupied cells of a
- * habitat at least `MIN_HABITAT_AREA` cells large. The passable cells of a species are not
- * always one connected habitat — this terrain's water is 23 disconnected lakes, several of
- * them a few dozen cells — and a handful of founders in a micro-pond breed up to their
- * species cap inside it, where no crop can regrow, and starve. Habitats smaller than the
- * threshold are left unpopulated, which keeps them unpopulated: nothing can walk in.
+ * Place `FOUNDERS[s].initial` individuals of each founder on random unoccupied cells of a
+ * habitat at least `MIN_HABITAT_AREA` cells large, each with the founder's reference genome.
+ * The passable cells of a species are not always one connected habitat — this terrain's water
+ * is 23 disconnected lakes, several of them a few dozen cells — and a handful of founders in a
+ * micro-pond breed up to their species cap inside it, where no crop can regrow, and starve.
+ * Habitats smaller than the threshold are left unpopulated, which keeps them unpopulated:
+ * nothing can walk in.
  */
-export function spawnInitialCreatures(biome: Uint8Array, pop: Population, rng: () => number): void {
+export function spawnInitialCreatures(
+  biome: Uint8Array,
+  pop: Population,
+  registry: SpeciesRegistry,
+  rng: () => number,
+): void {
   const area = new Int32Array(GRID);
   const members = new Int32Array(GRID);
-  for (let s = 0; s < SPECIES_COUNT; s++) {
-    const sp = SPECIES[s];
-    habitatAreas(biome, s, area, members);
-    for (let n = 0; n < sp.initial; n++) {
+  for (let s = 0; s < FOUNDERS.length; s++) {
+    const spec = FOUNDERS[s];
+    habitatAreas(biome, registry.refBiome[s], area, members);
+    const src = registry.refOf(s);
+    for (let n = 0; n < spec.initial; n++) {
       for (let attempt = 0; attempt < 30; attempt++) {
         const cell = (rng() * GRID) | 0;
         if (area[cell] < MIN_HABITAT_AREA || pop.occupant[cell] !== -1) continue;
-        if (!pop.spawn(s as SpeciesId, cell, sp.startEnergy)) return; // pool full: stop seeding
+        // pool full: stop seeding
+        if (pop.spawn(cell, spec.startEnergy, s, registry.colorSlot[s], src, registry) === -1) return;
         break;
       }
     }

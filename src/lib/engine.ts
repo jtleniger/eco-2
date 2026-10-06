@@ -7,8 +7,16 @@ import {
 } from './config.ts';
 import { seasonName } from './climate.ts';
 import { coverage } from './food.ts';
+import { decodeTraits } from './genetics.ts';
 import { BIOME_COUNT, FOOD_COUNT } from './palette.ts';
 import { Renderer } from './renderer.ts';
+import {
+  SPECIES_PALETTE,
+  type SpeciesInfo,
+  dietLabel,
+  habitatLabel,
+  preyLabel,
+} from './species.ts';
 import { ui } from './ui.svelte.ts';
 import { World } from './world.ts';
 
@@ -55,6 +63,7 @@ export class Engine {
     ui.seasonOffset = this.world.seasonOffset;
     ui.meanTemp = this.world.meanTempBase + this.world.seasonOffset;
     this.pushStats();
+    ui.selectedSpecies = null;
 
     this.renderer.paint(this.world.biome, this.world.food, this.world.population);
     this.dirty = false;
@@ -102,8 +111,44 @@ export class Engine {
       cov[f] = coverage(this.world.counts, this.world.eligible, f);
     }
     ui.counts = Array.from(this.world.counts);
-    ui.creatureCounts = Array.from(this.world.population.counts);
+    this.pushSpecies();
     ui.coverage = cov;
+  }
+
+  /**
+   * Rebuild the UI species list from the registry, most populous first, with extinct species
+   * last; ties break on peak and then on budding order.
+   */
+  private pushSpecies(): void {
+    const reg = this.world.registry;
+    const pop = this.world.population;
+    const out: SpeciesInfo[] = [];
+    for (let s = 0; s < reg.count; s++) {
+      out.push({
+        id: s,
+        name: reg.name[s],
+        hex: SPECIES_PALETTE[reg.colorSlot[s]],
+        live: pop.speciesCounts[s],
+        peak: reg.peak[s],
+        maxPop: reg.maxPop[s],
+        founderTick: reg.founderTick[s],
+        extinctTick: reg.extinctTick[s],
+        parentName: reg.parent[s] < 0 ? null : reg.name[reg.parent[s]],
+        generation: reg.generation[s],
+        diet: dietLabel(reg.refFood[s]),
+        habitat: habitatLabel(reg.refBiome[s]),
+        prey: preyLabel(reg.refPrey[s]),
+        traits: decodeTraits(reg.refGenes[s], 0),
+      });
+    }
+    out.sort(
+      (a, b) =>
+        Number(a.extinctTick >= 0) - Number(b.extinctTick >= 0) ||
+        b.live - a.live ||
+        b.peak - a.peak ||
+        a.id - b.id,
+    );
+    ui.species = out;
   }
 
   private frame = (ts: number): void => {

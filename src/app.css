@@ -70,10 +70,25 @@ canvas {
   width: 300px;
   height: 100%;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   background: #161d29;
   border-left: 1px solid #2c3644;
   padding: 12px;
   box-sizing: border-box;
+}
+.menu-panel > .menu-head,
+.menu-panel > h3,
+.menu-panel > .row {
+  flex: none;
+}
+/* The species list is the one growing section: it takes the leftover height and scrolls
+   inside itself, so a long-lived run cannot push the World section off the panel. */
+.species-list {
+  flex: 1 1 auto;
+  min-height: 6rem;
+  overflow-y: auto;
+  border-bottom: 1px solid #2c3644;
 }
 .menu-head {
   display: flex;
@@ -118,4 +133,25 @@ canvas {
   height: 12px;
   border: 1px solid #00000066;
   flex: none;
+}
+button.row {
+  width: 100%;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.row:hover {
+  background: #222d3d;
+}
+.row.extinct {
+  opacity: 0.45;
+}
+.detail {
+  border: 1px solid #2c3644;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
 }
