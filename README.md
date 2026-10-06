@@ -5,24 +5,47 @@ whose color encodes its biome (water, beach, desert, fields, forest, swamp,
 mountain, snow), biome-appropriate food that regrows toward a per-type carrying
 capacity, and four creature founder lineages that live off it and evolve.
 
-| Founder | Colour | Diet | Habitat |
-| --- | --- | --- | --- |
-| Grazer | `#ffff00` | land plants | land |
-| Minnow | `#00f0ff` | Algae | water |
-| Hunter | `#ff1a1a` | Grazers | land |
-| Pike | `#ff00ff` | Minnows | water |
+| Founder | Colour | Diet | Habitat | Size | Class |
+| --- | --- | --- | --- | --- | --- |
+| Grazer | `#ffff00` | land plants | land | 1.0 | Herbivore |
+| Minnow | `#00f0ff` | Algae | water | 0.6 | Herbivore |
+| Hunter | `#ff1a1a` | smaller creatures | land | 3.0 | Carnivore |
+| Pike | `#ff00ff` | smaller creatures | water | 2.5 | Carnivore |
 
-Every individual carries its own genome — thirteen continuous traits (vision,
-speed, metabolism, energy caps, age, thermal bands, …) plus three categorical
-bitmasks for habitat, diet and prey class. Offspring recombine both parents'
-genomes and mutate, so traits drift within a lineage. Two creatures can only
-mate when their genomes are close enough, so a newborn that is still within
-`SPECIATION_DISTANCE` of either parent stays in that parent's species however far
-the species' reference genome has drifted. Only a child too distant from both
-parents to breed with either is reproductively isolated: it founds a new species,
-named after its parent (`Grazer 2`) and shown in the menu with an assigned palette
-colour, and both parents leave their old species to become its founding pair, so
-the daughter lineage can reproduce instead of dying out as a single member.
+Every individual carries its own genome — fifteen continuous traits (vision,
+speed, metabolism, energy caps, age, thermal bands, body `size`, and a
+`carnivory` axis from 0 Herbivore to 1 Carnivore) plus two categorical bitmasks
+for habitat and digestible plants. The habitat mask gates which biomes a creature
+may enter, but a mutation can add bits no member ever uses — Deep Water and Beach
+host no food — so the menu's habitat line reports the biomes the species'
+members have actually stood on, not the mask. The mask is not the only way in:
+foodless barriers also yield to body size, so a creature can cross them without
+carrying the bit. A water creature whose `size` reaches 1 may swim open Deep
+Water, a land creature of `size` 1 may wade shallow Water, and Beach is walkable
+by anything of `size` 1 — so the larger fish can range between lakes across the
+deep and along the sand while the smallest stay in their own shallows, and a big
+land animal can ford a channel to reach the far bank. Eating is one unified edibility rule:
+a creature grazes a plant cell when the plant's bit is set in its `foodMask` and
+its `carnivory` is below `CARNIVORE_MIN`, and it kills a creature it lands on
+when its `carnivory` is at least `HERBIVORE_MAX` and its mass is at least
+`PREY_SIZE_RATIO` (1.3) times the target's — so predators eat creatures that are
+significantly smaller, not a fixed taxonomic class. The trophic class shown in
+the menu is derived from `carnivory` (`< 0.34` Herbivore, `< 0.66` Omnivore,
+else Carnivore), a plant meal is worth `(1 - carnivory)` of its `eatGain` so
+omnivores graze at reduced yield, a kill's calories scale with the prey's mass
+(`PREY_CALORIE_MULT`), and upkeep scales with `size^0.75` (Kleiber-like). A meal
+is credited at that same `size^0.75`, so a bigger body eats a bigger mouthful: the
+larger upkeep is met by larger meals, size is not a pure tax, and fish grow past
+their founding size instead of shrinking to the gene floor. Offspring recombine both parents' genomes and mutate, so
+traits drift within a lineage. Two creatures can only mate when their genomes are
+close enough, so a newborn that is still within `SPECIATION_DISTANCE` of either
+parent stays in that parent's species however far the species' reference genome
+has drifted. Only a child too distant from both parents to breed with either is
+reproductively isolated: it founds a new species and both parents leave their old
+species to become its founding pair, so the daughter lineage can reproduce
+instead of dying out as a single member. A founding child is named by a local,
+seeded pronounceable generator (`src/lib/names.ts`), so a seeded run reproduces
+the same species names.
 
 Each creature is one agent with energy, age and a cell: it steers toward the
 nearest visible food or prey, eats what it lands on, and reproduces sexually by
@@ -77,9 +100,9 @@ backing store; the canvas is integer-upscaled with `image-rendering: pixelated`.
 | --- | --- |
 | `src/lib/config.ts` | every tunable: world size, tick rate, speeds, terrain thresholds |
 | `src/lib/palette.ts` | biome/food ids, colors, densities, biome eligibility — single source of truth for cell values |
-| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `climate.ts`, `food.ts`, `genetics.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, the season clock, food regrowth, the genome operators, the founder/species registry and the creature agents |
+| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `climate.ts`, `food.ts`, `genetics.ts`, `names.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, the season clock, food regrowth, the genome operators, the seeded name generator, the founder/species registry and the creature agents |
 | `src/lib/world.ts` | all simulated state + one tick; no canvas, DOM or UI coupling |
-| `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, determinism, caps, speciation and extinction, a 5000-tick ecosystem survival run |
+| `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, the unified edibility rule, size/carnivory tradeoffs, seeded species names, determinism, caps, speciation and extinction, a 5000-tick ecosystem survival run |
 | `src/lib/renderer.ts` | Canvas 2D `ImageData` blitter, one pixel per cell (creature over food over biome) |
 | `src/lib/engine.ts` | canvas, clock and UI mirror driving `World` (accumulator, spiral guard) |
 | `src/lib/ui.svelte.ts` | `$state` object bridging engine → components |

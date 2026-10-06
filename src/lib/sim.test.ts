@@ -14,10 +14,17 @@ import {
 import { seasonName, seasonOffset } from './climate.ts';
 import { Population, spawnInitialCreatures } from './creatures.ts';
 import { computeEligibleCells, regrowTick } from './food.ts';
-import { GENE_COUNT, GENES, classMaskOf, mutate } from './genetics.ts';
-import { Biome, FOODS, FOOD_COUNT, NONE, hexToRgb } from './palette.ts';
+import { GENE_COUNT, GENES, dietClassOf, mutate } from './genetics.ts';
+import { Biome, Food, FOODS, FOOD_COUNT, NONE, hexToRgb } from './palette.ts';
 import { mulberry32 } from './rng.ts';
-import { FOUNDERS, SPECIES_PALETTE_LUT, SpeciesRegistry } from './species.ts';
+import {
+  FOUNDERS,
+  SPECIES_PALETTE_LUT,
+  type SpeciesTraits,
+  SpeciesRegistry,
+  habitatLabel,
+  writeTraits,
+} from './species.ts';
 import { classify, generateTerrain } from './terrain.ts';
 import { World } from './world.ts';
 
@@ -40,6 +47,35 @@ function spawnFounder(
 }
 
 /**
+ * Spawn founder `speciesId`'s genome with `overrides`-patched traits, so a test can put an
+ * arbitrary size/carnivory/diet combination on the grid while keeping the species' masks.
+ */
+function spawnCustom(
+  pop: Population,
+  registry: SpeciesRegistry,
+  cell: number,
+  energy: number,
+  speciesId: number,
+  overrides: Partial<SpeciesTraits>,
+): number {
+  const spec = FOUNDERS[speciesId];
+  const genes = new Float32Array(GENE_COUNT);
+  writeTraits(genes, 0, { ...spec, ...overrides });
+  let biomeMask = 0;
+  for (const b of spec.biomes) biomeMask |= 1 << b;
+  let foodMask = 0;
+  for (const f of spec.foods) foodMask |= 1 << f;
+  return pop.spawn(
+    cell,
+    energy,
+    speciesId,
+    registry.colorSlot[speciesId],
+    { genes, off: 0, biomeMask, foodMask },
+    registry,
+  );
+}
+
+/**
  * Every live slot is well formed and the occupant grid agrees with the slots.
  *
  * Note: standing on a biome the individual's `biomeMask` excludes is NOT a violation. The
@@ -56,11 +92,6 @@ function assertPopulationSound(pop: Population, registry: SpeciesRegistry): void
     assert.ok(pop.species[i] < registry.count, `slot ${i} species in range`);
     assert.ok(pop.pos[i] >= 0 && pop.pos[i] < GRID, `slot ${i} pos in range`);
     assert.equal(pop.dead[i], 0, `slot ${i} is not a zombie`);
-    assert.equal(
-      pop.cls[i],
-      classMaskOf(pop.foodMask[i], pop.preyMask[i]),
-      `slot ${i} trophic class matches its masks`,
-    );
     for (let g = 0; g < GENE_COUNT; g++) {
       const v = pop.genes[i * GENE_COUNT + g];
       assert.ok(
@@ -121,6 +152,8 @@ test('founder registry describes FOUNDERS', () => {
       spec.tempMax,
       spec.comfortMin,
       spec.comfortMax,
+      spec.size,
+      spec.carnivory,
     ];
     for (let g = 0; g < GENE_COUNT; g++) {
       assert.ok(
@@ -134,9 +167,6 @@ test('founder registry describes FOUNDERS', () => {
     let foodMask = 0;
     for (const f of spec.foods) foodMask |= 1 << f;
     assert.equal(registry.refFood[s], foodMask, `${spec.name} food mask`);
-    let preyMask = 0;
-    for (const c of spec.preyClasses) preyMask |= c;
-    assert.equal(registry.refPrey[s], preyMask, `${spec.name} prey mask`);
     const [r, g, b] = hexToRgb(spec.hex);
     assert.deepEqual(
       [
@@ -207,6 +237,7 @@ test('a seed reproduces the same run', () => {
     return {
       counts: Array.from(w.counts),
       species: Array.from(w.population.speciesCounts),
+      names: w.registry.name.slice(),
       tick: w.tick,
     };
   };
@@ -252,6 +283,124 @@ test('spawn placement respects biomes, occupancy and the pool limit', () => {
   spawnInitialCreatures(biome, tinyPool, tinyRegistry, mulberry32(11));
   assert.equal(tinyPool.count, 4, 'stops at pool capacity');
   assert.equal(spawnFounder(tinyPool, tinyRegistry, 0, 0, 10), -1, 'spawn refuses when full');
+});
+
+test('habitat records where members go, not the genome mask', () => {
+  // A Grazer's genome allows seven land biomes, but on an all-Fields map it can only ever
+  // stand on Fields, so the menu must not claim Snow/Desert/Mountain as its habitat.
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const foodCounts = new Uint32Array(FOOD_COUNT);
+  const rng = mulberry32(3);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  assert.notEqual((registry.refBiome[0] >>> Biome.Snow) & 1, 0, 'genome mask lists Snow');
+  assert.ok(spawnFounder(pop, registry, 0, 100 * W + 100, FOUNDERS[0].startEnergy) >= 0);
+  assert.equal(registry.habitat[0], 0, 'no habitat before the first tick');
+
+  for (let t = 0; t < 50; t++) pop.step(biome, food, foodCounts, rng, tempBase, 0, registry, t);
+
+  assert.equal(registry.habitat[0], 1 << Biome.Fields, 'only the occupied biome is listed');
+  assert.notEqual(registry.habitat[0], registry.refBiome[0], 'habitat is not the genome mask');
+  assert.equal(habitatLabel(registry.habitat[0]), 'Fields', 'the menu names the visited biome');
+  assert.ok(
+    habitatLabel(registry.refBiome[0]).includes('Snow'),
+    'the genome mask lists Snow, which no member visits',
+  );
+});
+
+test('a big fish crosses deep water and beach, a small one cannot', () => {
+  // Row 100 is Water at x=10 (start) and x=12 (goal), with a foodless `barrier` at x=11.
+  const barrierRow = (barrier: number): Uint8Array => {
+    const biome = new Uint8Array(GRID).fill(Biome.Fields);
+    const row = 100 * W;
+    biome[row + 10] = Biome.Water;
+    biome[row + 11] = barrier;
+    biome[row + 12] = Biome.Water;
+    return biome;
+  };
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const row = 100 * W;
+
+  for (const [barrier, label] of [
+    [Biome.DeepWater, 'Deep Water'],
+    [Biome.Beach, 'Beach'],
+  ] as const) {
+    // Pike (size 2.5) is big enough to cross, so it reaches and eats the minnow beyond.
+    const crossed = barrierRow(barrier);
+    const crossedFood = new Uint8Array(GRID).fill(NONE);
+    const crossedCounts = new Uint32Array(FOOD_COUNT);
+    const a = founderPop();
+    assert.ok(spawnFounder(a.pop, a.registry, 3, row + 10, FOUNDERS[3].startEnergy) >= 0, 'pike spawned');
+    assert.ok(
+      spawnCustom(a.pop, a.registry, row + 12, 100, 1, { size: 0.6, carnivory: 0, moveChance: 0 }) >= 0,
+      'prey spawned beyond the barrier',
+    );
+    const rngA = mulberry32(1);
+    for (let t = 0; t < 20 && a.pop.speciesCounts[1] > 0; t++) {
+      a.pop.step(crossed, crossedFood, crossedCounts, rngA, tempBase, 0, a.registry, t);
+    }
+    assert.equal(a.pop.speciesCounts[1], 0, `pike crossed ${label} to catch the prey`);
+
+    // Minnow (size 0.6) is too small: the algae beyond the barrier is never reached.
+    const blocked = barrierRow(barrier);
+    const blockedFood = new Uint8Array(GRID).fill(NONE);
+    const blockedCounts = new Uint32Array(FOOD_COUNT);
+    blockedFood[row + 12] = Food.Algae;
+    blockedCounts[Food.Algae] = 1;
+    const b = founderPop();
+    assert.ok(spawnFounder(b.pop, b.registry, 1, row + 10, FOUNDERS[1].startEnergy) >= 0, 'minnow spawned');
+    const rngB = mulberry32(1);
+    for (let t = 0; t < 30; t++) {
+      b.pop.step(blocked, blockedFood, blockedCounts, rngB, tempBase, 0, b.registry, t);
+    }
+    assert.equal(b.pop.pos[0], row + 10, `minnow never entered ${label}`);
+    assert.equal(blockedFood[row + 12], Food.Algae, `algae beyond ${label} is untouched`);
+  }
+});
+
+test('a big land creature wades shallow water, a small one cannot', () => {
+  // A one-cell Water channel at x=11 between the grazer and the grain, spanning every row so
+  // the diagonal step around a lone cell cannot get past it.
+  const build = (): Uint8Array => {
+    const biome = new Uint8Array(GRID).fill(Biome.Fields);
+    for (let y = 0; y < H; y++) biome[y * W + 11] = Biome.Water;
+    return biome;
+  };
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const row = 100 * W;
+
+  const waded = build();
+  const wadedFood = new Uint8Array(GRID).fill(NONE);
+  const wadedCounts = new Uint32Array(FOOD_COUNT);
+  wadedFood[row + 12] = Food.Grain;
+  wadedCounts[Food.Grain] = 1;
+  const big = founderPop();
+  assert.ok(
+    spawnCustom(big.pop, big.registry, row + 10, 120, 0, { size: 3, moveChance: 1, speed: 1 }) >= 0,
+    'big grazer spawned',
+  );
+  const rngBig = mulberry32(1);
+  for (let t = 0; t < 20 && wadedCounts[Food.Grain] > 0; t++) {
+    big.pop.step(waded, wadedFood, wadedCounts, rngBig, tempBase, 0, big.registry, t);
+  }
+  assert.equal(wadedCounts[Food.Grain], 0, 'the big grazer waded the channel to the grain');
+
+  const blocked = build();
+  const blockedFood = new Uint8Array(GRID).fill(NONE);
+  const blockedCounts = new Uint32Array(FOOD_COUNT);
+  blockedFood[row + 12] = Food.Grain;
+  blockedCounts[Food.Grain] = 1;
+  const small = founderPop();
+  assert.ok(
+    spawnCustom(small.pop, small.registry, row + 10, 120, 0, { size: 0.6, moveChance: 1, speed: 1 }) >= 0,
+    'small grazer spawned',
+  );
+  const rngSmall = mulberry32(1);
+  for (let t = 0; t < 30; t++) {
+    small.pop.step(blocked, blockedFood, blockedCounts, rngSmall, tempBase, 0, small.registry, t);
+  }
+  assert.equal(blockedFood[row + 12], Food.Grain, 'the small grazer could not cross the channel');
 });
 
 test('the ecosystem survives 5000 ticks', () => {
@@ -424,7 +573,6 @@ test('mutation respects gene bounds and changes the genome', () => {
   const masks = {
     biomeMask: registry.refBiome[0],
     foodMask: registry.refFood[0],
-    preyMask: registry.refPrey[0],
   };
   mutate(scratch, 0, masks, mulberry32(1));
 
@@ -451,12 +599,15 @@ test('a distant genome founds a new species', () => {
     off: 0,
     biomeMask: registry.refBiome[0],
     foodMask: registry.refFood[0],
-    preyMask: registry.refPrey[0],
   };
-  const id = registry.classify(distant, 0, 0, 0);
+  const id = registry.classify(distant, 0, 0, 0, mulberry32(1));
   assert.ok(id >= FOUNDERS.length, `distant genome founds a new species, got ${id}`);
   assert.equal(registry.parent[id], 0, 'child of Grazer');
-  assert.ok(registry.name[id].startsWith('Grazer'), `named after its parent: ${registry.name[id]}`);
+  assert.ok(registry.name[id].length > 0, `daughter is named: ${registry.name[id]}`);
+  assert.ok(
+    !registry.name[id].startsWith('Grazer'),
+    'daughter is not named after its parent',
+  );
   assert.equal(registry.generation[id], 1);
   assert.equal(registry.maxPop[id], FOUNDERS[0].maxPop);
 
@@ -465,9 +616,8 @@ test('a distant genome founds a new species', () => {
     off: 0,
     biomeMask: registry.refBiome[0],
     foodMask: registry.refFood[0],
-    preyMask: registry.refPrey[0],
   };
-  assert.equal(registry.classify(same, 0, 0, 0), 0, 'an unchanged genome stays in its species');
+  assert.equal(registry.classify(same, 0, 0, 0, mulberry32(2)), 0, 'an unchanged genome stays in its species');
 });
 
 test('distant genomes do not mate', () => {
@@ -500,14 +650,27 @@ test('distant genomes do not mate', () => {
   assert.ok(pair.pop.count >= 3, `compatible neighbours reproduce, population ${pair.pop.count}`);
 });
 
-test('speciation actually happens', () => {
-  const world = new World();
-  world.reset(12345);
-  let firstTick = -1;
-  for (let t = 0; t < 12000; t++) {
-    world.step();
-    if (firstTick < 0 && world.registry.count > FOUNDERS.length) firstTick = world.tick;
+/**
+ * Seed-12345 world stepped for 12000 ticks, computed once and shared by the tests that need
+ * a speciated run. `firstTick` is the tick the first daughter species appeared.
+ */
+let speciationRun: { world: World; firstTick: number } | null = null;
+function seededSpeciationRun(): { world: World; firstTick: number } {
+  if (!speciationRun) {
+    const world = new World();
+    world.reset(12345);
+    let firstTick = -1;
+    for (let t = 0; t < 12000; t++) {
+      world.step();
+      if (firstTick < 0 && world.registry.count > FOUNDERS.length) firstTick = world.tick;
+    }
+    speciationRun = { world, firstTick };
   }
+  return speciationRun;
+}
+
+test('speciation actually happens', () => {
+  const { world, firstTick } = seededSpeciationRun();
   console.log(
     `speciation: first new species at tick ${firstTick}, ${world.registry.count} species after ${world.tick} ticks (seed 12345)`,
   );
@@ -519,6 +682,185 @@ test('speciation actually happens', () => {
     assert.ok(world.population.speciesCounts[s] >= 0, `species ${s} live count valid`);
     assert.ok(world.registry.name[s].length > 0, `species ${s} named`);
   }
+});
+
+test('daughter species get unique random names', () => {
+  const { world } = seededSpeciationRun();
+  const names = world.registry.name.slice(0, world.registry.count);
+  assert.ok(names.length > FOUNDERS.length, 'the run speciated');
+  assert.equal(new Set(names).size, names.length, `names are distinct: ${names.join(', ')}`);
+  for (const name of names) {
+    assert.ok(name.length > 0, 'every species is named');
+    assert.doesNotMatch(name, / (2|3|4)$/, `"${name}" is not an old-style ordinal name`);
+  }
+  for (const name of names.slice(FOUNDERS.length)) {
+    assert.doesNotMatch(
+      name,
+      /^(Grazer|Minnow|Hunter|Pike)$/,
+      `daughter "${name}" does not reuse a founder name`,
+    );
+  }
+});
+
+test('a predator eats a much smaller creature', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  assert.ok(
+    spawnCustom(pop, registry, 100 * W + 100, 110, 2, {
+      size: 4,
+      carnivory: 1,
+      vision: 8,
+      speed: 2,
+      moveChance: 1,
+    }) >= 0,
+    'hunter spawned',
+  );
+  assert.ok(
+    spawnCustom(pop, registry, 100 * W + 102, 60, 0, {
+      size: 1,
+      carnivory: 0,
+      speed: 1,
+      moveChance: 0,
+    }) >= 0,
+    'prey spawned',
+  );
+  const rng = mulberry32(9);
+  let ticks = 0;
+  while (pop.speciesCounts[0] > 0 && ticks < 100) {
+    pop.step(biome, food, counts, rng, tempBase, 0, registry, ticks);
+    ticks++;
+  }
+  assert.equal(pop.speciesCounts[0], 0, `prey eaten within ${ticks} ticks`);
+  assert.ok(pop.speciesCounts[2] >= 1, 'hunter survived the hunt');
+});
+
+test('equal-sized predators do not eat each other', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  assert.ok(
+    spawnCustom(pop, registry, 100 * W + 100, 30, 2, { size: 3, carnivory: 1, moveChance: 0 }) >= 0,
+    'first predator spawned',
+  );
+  assert.ok(
+    spawnCustom(pop, registry, 100 * W + 101, 30, 2, { size: 3, carnivory: 1, moveChance: 0 }) >= 0,
+    'second predator spawned',
+  );
+  pop.step(biome, food, counts, mulberry32(4), tempBase, 0, registry, 0);
+  assert.equal(pop.count, 2, 'neither predator ate the other');
+  assert.equal(pop.speciesCounts[2], 2, 'both predators are alive');
+});
+
+test('a herbivore does not eat creatures and a carnivore does not graze', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+
+  const grazers = founderPop();
+  assert.ok(
+    spawnCustom(grazers.pop, grazers.registry, 100 * W + 100, 200, 0, {
+      size: 5,
+      carnivory: 0,
+      moveChance: 0,
+    }) >= 0,
+    'big herbivore spawned',
+  );
+  assert.ok(
+    spawnCustom(grazers.pop, grazers.registry, 100 * W + 101, 30, 1, {
+      size: 1,
+      carnivory: 0,
+      moveChance: 0,
+    }) >= 0,
+    'small creature spawned',
+  );
+  grazers.pop.step(biome, food, counts, mulberry32(5), tempBase, 0, grazers.registry, 0);
+  assert.equal(grazers.pop.count, 2, 'the herbivore did not eat the small creature');
+  assert.equal(grazers.pop.speciesCounts[1], 1, 'the small creature is alive');
+
+  const carnivores = founderPop();
+  const cell = 100 * W + 100;
+  food[cell] = Food.Grain; // digestible for a Grazer, not for a pure carnivore
+  counts[Food.Grain] = 1;
+  assert.ok(
+    spawnCustom(carnivores.pop, carnivores.registry, cell, 200, 0, {
+      size: 5,
+      carnivory: 1,
+      moveChance: 0,
+    }) >= 0,
+    'big carnivore spawned',
+  );
+  carnivores.pop.step(biome, food, counts, mulberry32(6), tempBase, 0, carnivores.registry, 0);
+  assert.equal(food[cell], Food.Grain, 'the carnivore did not graze the plant');
+  assert.equal(counts[Food.Grain], 1, 'the food counter is unchanged');
+});
+
+test('an omnivore grazes at reduced yield', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  const cell = 100 * W + 100;
+  const eatGain = 80;
+  const metabolism = 0.5;
+  food[cell] = Food.Grain;
+  counts[Food.Grain] = 1;
+  assert.ok(
+    spawnCustom(pop, registry, cell, 100, 0, {
+      size: 2,
+      carnivory: 0.5,
+      eatGain,
+      metabolism,
+      maxEnergy: 400,
+      moveChance: 0,
+    }) >= 0,
+    'omnivore spawned',
+  );
+  pop.step(biome, food, counts, mulberry32(8), tempBase, 0, registry, 0);
+
+  const expected = 100 - metabolism * Math.pow(2, 0.75) + eatGain * 0.5 * Math.pow(2, 0.75);
+  assert.ok(
+    Math.abs(pop.energy[0] - expected) < 1e-4,
+    `omnivore energy ${pop.energy[0]} ~= ${expected}`,
+  );
+  assert.equal(food[cell], NONE, 'the grazed cell is cleared');
+  assert.equal(counts[Food.Grain], 0, 'the food counter is decremented');
+});
+
+test('a bigger body gains more energy from the same meal', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const { pop, registry } = founderPop();
+  // Far apart so the two cannot see each other's cell or reach a mate within MATING_RADIUS.
+  const smallCell = 100 * W + 100;
+  const bigCell = 100 * W + 120;
+  food[smallCell] = Food.Grain;
+  food[bigCell] = Food.Grain;
+  counts[Food.Grain] = 2;
+  const common = { carnivory: 0, eatGain: 40, metabolism: 0.5, maxEnergy: 400, moveChance: 0 };
+  assert.ok(spawnCustom(pop, registry, smallCell, 100, 0, { ...common, size: 1 }) >= 0, 'size 1 spawned');
+  assert.ok(spawnCustom(pop, registry, bigCell, 100, 0, { ...common, size: 2 }) >= 0, 'size 2 spawned');
+  pop.step(biome, food, counts, mulberry32(3), tempBase, 0, registry, 0);
+
+  const gainPerMass = common.eatGain - common.metabolism; // (eatGain - metabolism) * size^0.75
+  assert.ok(
+    Math.abs((pop.energy[1] - pop.energy[0]) - gainPerMass * (Math.pow(2, 0.75) - 1)) < 1e-4,
+    `size 2 gains ${(pop.energy[1] - pop.energy[0]).toFixed(3)} more than size 1`,
+  );
+});
+
+test('dietClassOf partitions the carnivory gene', () => {
+  assert.equal(dietClassOf(0), 'Herbivore');
+  assert.equal(dietClassOf(0.5), 'Omnivore');
+  assert.equal(dietClassOf(1), 'Carnivore');
 });
 
 test('extinction is recorded', () => {

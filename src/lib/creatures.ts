@@ -1,21 +1,28 @@
 import {
+  BEACH_CROSS_SIZE,
+  CARNIVORE_MIN,
+  DEEP_WATER_CROSS_SIZE,
   GRID,
   H,
+  HERBIVORE_MAX,
   MATING_ENERGY_FRACTION,
   MATING_RADIUS,
   MAX_CREATURES,
   MAX_SPECIES,
+  METABOLIC_EXP,
   MIN_HABITAT_AREA,
+  PREY_CALORIE_MULT,
+  PREY_SIZE_RATIO,
+  SHALLOW_WATER_CROSS_SIZE,
   SPECIATION_DISTANCE,
   W,
 } from './config.ts';
-import { NONE } from './palette.ts';
+import { Biome, LAND_MASK, NONE } from './palette.ts';
 import {
   GENE,
   GENE_COUNT,
   type GenomeSource,
   type Masks,
-  classMaskOf,
   crossover,
   geneDistance,
   mutate,
@@ -42,10 +49,6 @@ export class Population {
   readonly biomeMask: Uint16Array;
   /** slot -> bit `f` set when the creature eats food `f`. */
   readonly foodMask: Uint16Array;
-  /** slot -> trophic class bits it hunts (`TROPHIC_*`). */
-  readonly preyMask: Uint8Array;
-  /** slot -> `classMaskOf(foodMask, preyMask)`. */
-  readonly cls: Uint8Array;
   /** slot -> 1 once it has mated this tick. */
   readonly mated: Uint8Array;
   /** slot -> cell index (`y * W + x`) */
@@ -69,8 +72,6 @@ export class Population {
     this.genes = new Float32Array(capacity * GENE_COUNT);
     this.biomeMask = new Uint16Array(capacity);
     this.foodMask = new Uint16Array(capacity);
-    this.preyMask = new Uint8Array(capacity);
-    this.cls = new Uint8Array(capacity);
     this.mated = new Uint8Array(capacity);
     this.pos = new Int32Array(capacity);
     this.energy = new Float32Array(capacity);
@@ -97,8 +98,6 @@ export class Population {
     for (let g = 0; g < GENE_COUNT; g++) this.genes[o + g] = src.genes[src.off + g];
     this.biomeMask[i] = src.biomeMask;
     this.foodMask[i] = src.foodMask;
-    this.preyMask[i] = src.preyMask;
-    this.cls[i] = classMaskOf(src.foodMask, src.preyMask);
     this.color[i] = colorSlot;
     this.species[i] = speciesId;
     this.pos[i] = at;
@@ -121,12 +120,10 @@ export class Population {
       0,
       masks.biomeMask,
       masks.foodMask,
-      masks.preyMask,
       this.genes,
       k * GENE_COUNT,
       this.biomeMask[k],
       this.foodMask[k],
-      this.preyMask[k],
     );
   }
 
@@ -137,7 +134,6 @@ export class Population {
       off: k * GENE_COUNT,
       biomeMask: this.biomeMask[k],
       foodMask: this.foodMask[k],
-      preyMask: this.preyMask[k],
     };
   }
 
@@ -153,8 +149,6 @@ export class Population {
       this.genes.copyWithin(oi, ol, ol + GENE_COUNT);
       this.biomeMask[i] = this.biomeMask[last];
       this.foodMask[i] = this.foodMask[last];
-      this.preyMask[i] = this.preyMask[last];
-      this.cls[i] = this.cls[last];
       this.color[i] = this.color[last];
       this.species[i] = this.species[last];
       this.mated[i] = this.mated[last];
@@ -194,16 +188,59 @@ export class Population {
     return prev === i ? -1 : prev;
   }
 
+  /** Body mass (gene `size`) of live slot `k`. */
+  private massOf(k: number): number {
+    return this.genes[k * GENE_COUNT + GENE.size];
+  }
+
   /**
-   * Nearest visible food (herbivore) or prey (predator) cell, or `-1`. A creature with both
-   * dietary masks set searches for food but still eats prey it lands on.
+   * Whether slot `i` may enter biome `b` without it being set in its genome mask: a foodless
+   * barrier its body is big enough to cross. A big water creature can swim open Deep Water, a
+   * big land creature can wade shallow Water, and Beach is walkable by anything with the bulk.
+   * The lineage check keeps swimmers in the water and walkers on land; size is the gate.
    */
+  private canCross(i: number, b: number): boolean {
+    const mask = this.biomeMask[i];
+    if (b === Biome.DeepWater) {
+      return (mask & (1 << Biome.Water)) !== 0 && this.massOf(i) >= DEEP_WATER_CROSS_SIZE;
+    }
+    if (b === Biome.Water) {
+      return (mask & LAND_MASK) !== 0 && this.massOf(i) >= SHALLOW_WATER_CROSS_SIZE;
+    }
+    if (b === Biome.Beach) return this.massOf(i) >= BEACH_CROSS_SIZE;
+    return false;
+  }
+
+  /** True when slot `i` may stand on biome `b`: a genome mask bit, or a wading/swimming cross. */
+  private canEnter(i: number, b: number): boolean {
+    return ((this.biomeMask[i] >>> b) & 1) === 1 || this.canCross(i, b);
+  }
+
+  /** Creatures slot `i` may kill: it hunts, and `j` is significantly smaller. */
+  private canEatCreature(i: number, j: number, biome: Uint8Array): boolean {
+    if (j < 0 || j === i || this.dead[j]) return false;
+    const o = i * GENE_COUNT;
+    if (this.genes[o + GENE.carnivory] < HERBIVORE_MAX) return false;
+    if (this.massOf(i) < this.massOf(j) * PREY_SIZE_RATIO) return false;
+    return this.canEnter(i, biome[this.pos[j]]);
+  }
+
+  /** Plant `f` slot `i` may graze: digestible bit set and it is not a pure predator. */
+  private canEatPlant(i: number, f: number): boolean {
+    if (f === NONE) return false;
+    if (((this.foodMask[i] >>> f) & 1) !== 1) return false;
+    return this.genes[i * GENE_COUNT + GENE.carnivory] < CARNIVORE_MIN;
+  }
+
+  /** True when the cell holds something slot `i` can eat (plant or smaller creature). */
+  private edibleAt(i: number, cell: number, biome: Uint8Array, food: Uint8Array): boolean {
+    return this.canEatPlant(i, food[cell]) || this.canEatCreature(i, this.occupant[cell], biome);
+  }
+
+  /** Nearest visible plant or edible creature cell, or `-1`. */
   private findTarget(i: number, biome: Uint8Array, food: Uint8Array): number {
     const o = i * GENE_COUNT;
     const vision = this.genes[o + GENE.vision];
-    const foodMask = this.foodMask[i];
-    const preyMask = this.preyMask[i];
-    const biomeMask = this.biomeMask[i];
     const cx = this.pos[i] % W;
     const cy = (this.pos[i] / W) | 0;
     let best = -1;
@@ -218,24 +255,9 @@ export class Population {
         const x = cx + dx;
         if (x < 0 || x >= W) continue;
         const cell = y * W + x;
-        if (foodMask !== 0) {
-          const f = food[cell];
-          if (f !== NONE && ((foodMask >>> f) & 1) === 1) {
-            best = cell;
-            bestD = d2;
-          }
-        } else {
-          const j = this.occupant[cell];
-          if (
-            j >= 0 &&
-            j !== i &&
-            !this.dead[j] &&
-            (preyMask & this.cls[j]) !== 0 &&
-            ((biomeMask >>> biome[this.pos[j]]) & 1) === 1
-          ) {
-            best = cell;
-            bestD = d2;
-          }
+        if (this.edibleAt(i, cell, biome, food)) {
+          best = cell;
+          bestD = d2;
         }
       }
     }
@@ -247,7 +269,6 @@ export class Population {
    * and `(0, dy)`, skipping duplicates. `-1` when each candidate is out of bounds or impassable.
    */
   private stepToward(i: number, target: number, biome: Uint8Array): number {
-    const biomeMask = this.biomeMask[i];
     const here = this.pos[i];
     const hx = here % W;
     const hy = (here / W) | 0;
@@ -263,7 +284,7 @@ export class Population {
       const y = hy + oy;
       if (x < 0 || x >= W || y < 0 || y >= H) continue;
       const cell = y * W + x;
-      if (((biomeMask >>> biome[cell]) & 1) === 1) return cell;
+      if (this.canEnter(i, biome[cell])) return cell;
     }
     return -1;
   }
@@ -278,7 +299,7 @@ export class Population {
     const y = ((here / W) | 0) + oy;
     if (x < 0 || x >= W || y < 0 || y >= H) return -1;
     const cell = y * W + x;
-    return ((this.biomeMask[i] >>> biome[cell]) & 1) === 1 ? cell : -1;
+    return this.canEnter(i, biome[cell]) ? cell : -1;
   }
 
   /**
@@ -292,7 +313,6 @@ export class Population {
     tempOffset: number,
     center: number,
   ): number {
-    const biomeMask = this.biomeMask[i];
     const here = this.pos[i];
     const hx = here % W;
     const hy = (here / W) | 0;
@@ -306,7 +326,7 @@ export class Population {
         const x = hx + dx;
         if (x < 0 || x >= W) continue;
         const c = y * W + x;
-        if (((biomeMask >>> biome[c]) & 1) !== 1) continue;
+        if (!this.canEnter(i, biome[c])) continue;
         const d = Math.abs(tempBase[c] + tempOffset - center);
         if (d < bestD) {
           bestD = d;
@@ -319,36 +339,31 @@ export class Population {
 
   /**
    * Consume the food at slot `i`'s cell, or a creature sharing it: the cell's occupant, or
-   * `displaced` — the creature whose occupant entry this tick's move overwrote.
+   * `displaced` — the creature whose occupant entry this tick's move overwrote. A plant meal
+   * is credited at `(1 - carnivory)` yield; a kill's calories scale with the prey's mass.
+   * Either meal is scaled by `size^METABOLIC_EXP`, the same power as upkeep: a bigger body eats
+   * a bigger mouthful, so size is not a pure tax and large lineages can persist and grow.
    */
-  private eat(i: number, food: Uint8Array, foodCounts: Uint32Array, displaced: number): void {
+  private eat(i: number, biome: Uint8Array, food: Uint8Array, foodCounts: Uint32Array, displaced: number): void {
     const o = i * GENE_COUNT;
     const cell = this.pos[i];
-    const foodMask = this.foodMask[i];
-
-    if (foodMask !== 0) {
-      const f = food[cell];
-      if (f !== NONE && ((foodMask >>> f) & 1) === 1) {
-        foodCounts[f]--;
-        food[cell] = NONE;
-        this.energy[i] = Math.min(
-          this.genes[o + GENE.maxEnergy],
-          this.energy[i] + this.genes[o + GENE.eatGain],
-        );
-      }
+    const carnivory = this.genes[o + GENE.carnivory];
+    const maxEnergy = this.genes[o + GENE.maxEnergy];
+    const bodyScale = Math.pow(this.massOf(i), METABOLIC_EXP);
+    const e = food[cell];
+    if (this.canEatPlant(i, e)) {
+      foodCounts[e]--;
+      food[cell] = NONE;
+      // Grazing yield falls off as the diet shifts toward carnivory.
+      this.energy[i] = Math.min(maxEnergy, this.energy[i] + this.genes[o + GENE.eatGain] * (1 - carnivory) * bodyScale);
     }
-
-    const preyMask = this.preyMask[i];
-    if (preyMask !== 0) {
-      let j = this.occupant[cell];
-      if (j < 0 || j === i) j = displaced;
-      if (j >= 0 && j !== i && !this.dead[j] && (preyMask & this.cls[j]) !== 0) {
-        this.dead[j] = 1; // swept later; never remove another slot mid-loop
-        this.energy[i] = Math.min(
-          this.genes[o + GENE.maxEnergy],
-          this.energy[i] + this.genes[o + GENE.eatGain],
-        );
-      }
+    let j = this.occupant[cell];
+    if (j < 0 || j === i) j = displaced;
+    if (this.canEatCreature(i, j, biome)) {
+      this.dead[j] = 1; // swept later; never remove another slot mid-loop
+      // Calories come from the prey's mass, so a bigger kill feeds more.
+      const gain = this.genes[o + GENE.eatGain] * PREY_CALORIE_MULT * (this.massOf(j) / this.massOf(i)) * bodyScale;
+      this.energy[i] = Math.min(maxEnergy, this.energy[i] + gain);
     }
   }
 
@@ -378,12 +393,10 @@ export class Population {
           oi,
           this.biomeMask[i],
           this.foodMask[i],
-          this.preyMask[i],
           this.genes,
           oj,
           this.biomeMask[j],
           this.foodMask[j],
-          this.preyMask[j],
         );
         if (d <= SPECIATION_DISTANCE) return j;
       }
@@ -411,7 +424,6 @@ export class Population {
       off: 0,
       biomeMask: masks.biomeMask,
       foodMask: masks.foodMask,
-      preyMask: masks.preyMask,
     };
     const childEnergy = Math.min(
       (this.energy[i] + this.energy[j]) * 0.5,
@@ -432,7 +444,7 @@ export class Population {
       speciesId = speciesB;
     } else {
       const before = registry.count;
-      speciesId = registry.classify(src, speciesA, speciesB, tick);
+      speciesId = registry.classify(src, speciesA, speciesB, tick, rng);
       founded = registry.count > before;
     }
     if (founded) {
@@ -476,7 +488,7 @@ export class Population {
       const o = i * GENE_COUNT;
       const s = this.species[i];
       this.age[i]++;
-      this.energy[i] -= this.genes[o + GENE.metabolism];
+      this.energy[i] -= this.genes[o + GENE.metabolism] * Math.pow(this.massOf(i), METABOLIC_EXP);
       if (this.energy[i] <= 0 || this.age[i] >= this.genes[o + GENE.maxAge]) {
         this.dead[i] = 1;
         this.remove(i, registry, tick);
@@ -521,7 +533,11 @@ export class Population {
         }
       }
 
-      this.eat(i, food, foodCounts, displaced);
+      // Record the species' observed habitat: its genome mask is only a passability
+      // capability, and can name biomes no member ever stands on.
+      registry.habitat[s] |= 1 << biome[this.pos[i]];
+
+      this.eat(i, biome, food, foodCounts, displaced);
 
       if (
         this.energy[i] >= this.genes[o + GENE.reproEnergy] * MATING_ENERGY_FRACTION &&
@@ -585,8 +601,8 @@ function habitatAreas(
  * The passable cells of a species are not always one connected habitat — this terrain's water
  * is 23 disconnected lakes, several of them a few dozen cells — and a handful of founders in a
  * micro-pond breed up to their species cap inside it, where no crop can regrow, and starve.
- * Habitats smaller than the threshold are left unpopulated, which keeps them unpopulated:
- * nothing can walk in.
+ * Habitats smaller than the threshold are left unpopulated, so no founder starts in a pond
+ * too small to feed it.
  */
 export function spawnInitialCreatures(
   biome: Uint8Array,
@@ -606,6 +622,7 @@ export function spawnInitialCreatures(
         if (area[cell] < MIN_HABITAT_AREA || pop.occupant[cell] !== -1) continue;
         // pool full: stop seeding
         if (pop.spawn(cell, spec.startEnergy, s, registry.colorSlot[s], src, registry) === -1) return;
+        registry.habitat[s] |= 1 << biome[cell];
         break;
       }
     }

@@ -7,7 +7,7 @@ import {
 } from './config.ts';
 import { seasonName } from './climate.ts';
 import { coverage } from './food.ts';
-import { decodeTraits } from './genetics.ts';
+import { decodeTraits, dietClassOf } from './genetics.ts';
 import { BIOME_COUNT, FOOD_COUNT } from './palette.ts';
 import { Renderer } from './renderer.ts';
 import {
@@ -124,6 +124,7 @@ export class Engine {
     const pop = this.world.population;
     const out: SpeciesInfo[] = [];
     for (let s = 0; s < reg.count; s++) {
+      const traits = decodeTraits(reg.refGenes[s], 0);
       out.push({
         id: s,
         name: reg.name[s],
@@ -136,9 +137,10 @@ export class Engine {
         parentName: reg.parent[s] < 0 ? null : reg.name[reg.parent[s]],
         generation: reg.generation[s],
         diet: dietLabel(reg.refFood[s]),
-        habitat: habitatLabel(reg.refBiome[s]),
-        prey: preyLabel(reg.refPrey[s]),
-        traits: decodeTraits(reg.refGenes[s], 0),
+        habitat: habitatLabel(reg.habitat[s]),
+        dietClass: dietClassOf(traits.carnivory),
+        prey: preyLabel(traits.carnivory, traits.size),
+        traits,
       });
     }
     out.sort(

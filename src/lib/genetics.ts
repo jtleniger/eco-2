@@ -1,9 +1,9 @@
-import { MUTATION_PROB_CATEGORICAL, MUTATION_SCALE } from './config.ts';
+import { CARNIVORE_MIN, HERBIVORE_MAX, MUTATION_PROB_CATEGORICAL, MUTATION_SCALE } from './config.ts';
 import { BIOME_COUNT, FOOD_COUNT } from './palette.ts';
 import type { SpeciesTraits } from './species.ts';
 
 /**
- * Heritable genome: continuous genes plus three categorical bitmasks. Pure and DOM-free.
+ * Heritable genome: continuous genes plus two categorical bitmasks. Pure and DOM-free.
  * `GENES` index order is load-bearing: it is the stride order of every genome row, and it
  * matches the numeric order of `GENE` below.
  */
@@ -21,8 +21,10 @@ export const GENE = {
   tempMax: 10,
   comfortMin: 11,
   comfortMax: 12,
+  size: 13,
+  carnivory: 14,
 } as const;
-export const GENE_COUNT = 13;
+export const GENE_COUNT = 15;
 
 export interface GeneSpec {
   min: number;
@@ -47,16 +49,17 @@ export const GENES: readonly GeneSpec[] = [
   { min: 0.6, max: 1.45, step: 0.02, integer: false }, // tempMax
   { min: -0.15, max: 0.65, step: 0.02, integer: false }, // comfortMin
   { min: 0.25, max: 1.05, step: 0.02, integer: false }, // comfortMax
+  { min: 0.4, max: 6, step: 0.06, integer: false }, // size (mass)
+  { min: 0, max: 1, step: 0.04, integer: false }, // carnivory
 ];
 
-/** Trophic classes, as bits of `preyMask`. */
-export const TROPHIC_HERBIVORE = 1; // bit 0
-export const TROPHIC_CARNIVORE = 2; // bit 1
-export const TROPHIC_COUNT = 2;
+export type DietClass = 'Herbivore' | 'Omnivore' | 'Carnivore';
 
-/** A creature's trophic class bits, derived from its two dietary masks. */
-export function classMaskOf(foodMask: number, preyMask: number): number {
-  return (foodMask !== 0 ? TROPHIC_HERBIVORE : 0) | (preyMask !== 0 ? TROPHIC_CARNIVORE : 0);
+/** Trophic class derived from the continuous carnivory gene. */
+export function dietClassOf(carnivory: number): DietClass {
+  return carnivory >= CARNIVORE_MIN ? 'Carnivore'
+    : carnivory >= HERBIVORE_MAX ? 'Omnivore'
+    : 'Herbivore';
 }
 
 /**
@@ -68,13 +71,11 @@ export interface GenomeSource {
   off: number;
   biomeMask: number;
   foodMask: number;
-  preyMask: number;
 }
 
 export interface Masks {
   biomeMask: number;
   foodMask: number;
-  preyMask: number;
 }
 
 /** Write one gene, clamped to its spec's range and rounded when the spec is integral. */
@@ -87,7 +88,7 @@ export function writeGene(dst: Float32Array, off: number, gene: number, value: n
 }
 
 /**
- * Mutate 13 genes of the genome at `off`, then independently toggle at most one bit of each
+ * Mutate every gene of the genome at `off`, then independently toggle at most one bit of each
  * mask. Masks are carried in the passed `masks` object and mutated in place. A creature left
  * unable to eat anything is not special-cased: that is selection.
  */
@@ -101,9 +102,6 @@ export function mutate(dst: Float32Array, off: number, masks: Masks, rng: () => 
   }
   if (rng() < MUTATION_PROB_CATEGORICAL) {
     masks.foodMask ^= 1 << ((rng() * FOOD_COUNT) | 0);
-  }
-  if (rng() < MUTATION_PROB_CATEGORICAL) {
-    masks.preyMask ^= 1 << ((rng() * TROPHIC_COUNT) | 0);
   }
 }
 
@@ -124,11 +122,10 @@ export function crossover(
   return {
     biomeMask: rng() < 0.5 ? a.biomeMask : b.biomeMask,
     foodMask: rng() < 0.5 ? a.foodMask : b.foodMask,
-    preyMask: rng() < 0.5 ? a.preyMask : b.preyMask,
   };
 }
 
-/** Decode the 13 genes at `off` into the plain trait object the UI and founders use. */
+/** Decode the genes at `off` into the plain trait object the UI and founders use. */
 export function decodeTraits(genes: Float32Array, off: number): SpeciesTraits {
   return {
     vision: genes[off + GENE.vision],
@@ -144,10 +141,12 @@ export function decodeTraits(genes: Float32Array, off: number): SpeciesTraits {
     tempMax: genes[off + GENE.tempMax],
     comfortMin: genes[off + GENE.comfortMin],
     comfortMax: genes[off + GENE.comfortMax],
+    size: genes[off + GENE.size],
+    carnivory: genes[off + GENE.carnivory],
   };
 }
 
-/** Weight of one mismatched categorical class relative to the 13-gene continuous term. */
+/** Weight of one mismatched categorical class relative to the continuous gene term. */
 export const W_CAT = 0.25;
 
 function popcount16(n: number): number {
@@ -160,20 +159,18 @@ function popcount16(n: number): number {
 
 /**
  * Normalized genomic distance in `[0, 1]`; `0` for identical genomes. Continuous genes are
- * scaled by their spec range; each categorical mask contributes its Hamming fraction, so a
- * full habitat swap alone is roughly a third of the way to the maximum.
+ * scaled by their spec range; each of the two categorical masks contributes its Hamming
+ * fraction, so a full habitat swap alone is a sizeable step toward the maximum.
  */
 export function geneDistance(
   ga: Float32Array,
   oa: number,
   bma: number,
   fma: number,
-  pma: number,
   gb: Float32Array,
   ob: number,
   bmb: number,
   fmb: number,
-  pmb: number,
 ): number {
   let aug = 0;
   for (let g = 0; g < GENE_COUNT; g++) {
@@ -185,7 +182,6 @@ export function geneDistance(
   const raw =
     aug +
     W_CAT * (popcount16(bma ^ bmb) / BIOME_COUNT) +
-    W_CAT * (popcount16(fma ^ fmb) / FOOD_COUNT) +
-    W_CAT * (popcount16(pma ^ pmb) / TROPHIC_COUNT);
-  return Math.sqrt(raw / (1 + 3 * W_CAT));
+    W_CAT * (popcount16(fma ^ fmb) / FOOD_COUNT);
+  return Math.sqrt(raw / (1 + 2 * W_CAT));
 }

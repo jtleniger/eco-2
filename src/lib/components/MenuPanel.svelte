@@ -57,7 +57,7 @@
           <i class="swatch" style="background:{sp.hex}"></i>
           <div class="col">
             <span class="name">{sp.name}</span>
-            <span class="sub">{sp.diet}{sp.prey ? ` · hunts ${sp.prey}` : ''}</span>
+            <span class="sub">{sp.dietClass}{sp.prey ? ` · ${sp.prey}` : ''}</span>
             {#if sp.extinctTick >= 0}
               <span class="sub">extinct @ {sp.extinctTick}</span>
             {/if}
@@ -80,9 +80,12 @@
               <span class="val">tick {sp.founderTick} · gen {sp.generation}</span>
             </div>
             <div class="row"><span class="name">parent</span><span class="val">{sp.parentName ?? '—'}</span></div>
+            <div class="row"><span class="name">class</span><span class="val">{sp.dietClass}</span></div>
             <div class="row"><span class="name">diet</span><span class="val">{sp.diet}</span></div>
             <div class="row"><span class="name">habitat</span><span class="val">{sp.habitat}</span></div>
             <div class="row"><span class="name">prey</span><span class="val">{sp.prey || '—'}</span></div>
+            <div class="row"><span class="name">size</span><span class="val">{sp.traits.size.toFixed(2)}</span></div>
+            <div class="row"><span class="name">carnivory</span><span class="val">{(sp.traits.carnivory * 100).toFixed(0)}%</span></div>
             <div class="row"><span class="name">vision</span><span class="val">{sp.traits.vision}</span></div>
             <div class="row"><span class="name">speed</span><span class="val">{sp.traits.speed}</span></div>
             <div class="row">

@@ -1,13 +1,13 @@
-import { MAX_SPECIES, SPECIATION_DISTANCE } from './config.ts';
+import { MAX_SPECIES, PREY_SIZE_RATIO, SPECIATION_DISTANCE } from './config.ts';
 import {
   GENE,
   GENE_COUNT,
   type GenomeSource,
-  TROPHIC_CARNIVORE,
-  TROPHIC_HERBIVORE,
+  dietClassOf,
   geneDistance,
   writeGene,
 } from './genetics.ts';
+import { generateName } from './names.ts';
 import { BIOMES, BIOME_COUNT, Biome, FOODS, FOOD_COUNT, Food, hexToRgb } from './palette.ts';
 
 const LAND = [
@@ -35,6 +35,8 @@ export interface SpeciesTraits {
   tempMax: number;
   comfortMin: number;
   comfortMax: number;
+  size: number;
+  carnivory: number;
 }
 
 /** A founder lineage: its traits plus the categorical genes and initial population. */
@@ -43,8 +45,6 @@ export interface FounderSpec extends SpeciesTraits {
   hex: string;
   biomes: readonly number[];
   foods: readonly number[];
-  /** Trophic class bits it hunts (`TROPHIC_*`). */
-  preyClasses: readonly number[];
   initial: number;
   maxPop: number;
 }
@@ -59,7 +59,6 @@ export const FOUNDERS: readonly FounderSpec[] = [
     hex: '#ffff00',
     biomes: LAND,
     foods: [Food.CactusFruit, Food.Grain, Food.Berries, Food.Mushroom, Food.Lichen],
-    preyClasses: [],
     vision: 6,
     speed: 1,
     moveChance: 0.8,
@@ -75,13 +74,14 @@ export const FOUNDERS: readonly FounderSpec[] = [
     tempMax: 1.08,
     comfortMin: 0.28,
     comfortMax: 0.72,
+    size: 1.0,
+    carnivory: 0.0,
   },
   {
     name: 'Minnow',
     hex: '#00f0ff',
     biomes: [Biome.Water],
     foods: [Food.Algae],
-    preyClasses: [],
     vision: 6,
     speed: 1,
     moveChance: 0.9,
@@ -97,17 +97,18 @@ export const FOUNDERS: readonly FounderSpec[] = [
     tempMax: 0.98,
     comfortMin: 0.16,
     comfortMax: 0.58,
+    size: 0.6,
+    carnivory: 0.0,
   },
   {
     name: 'Hunter',
     hex: '#ff1a1a',
     biomes: LAND,
     foods: [],
-    preyClasses: [TROPHIC_HERBIVORE],
     vision: 8,
     speed: 2,
     moveChance: 1,
-    metabolism: 0.05,
+    metabolism: 0.6,
     maxEnergy: 200,
     reproEnergy: 120,
     maxAge: 8000,
@@ -119,17 +120,18 @@ export const FOUNDERS: readonly FounderSpec[] = [
     tempMax: 1.08,
     comfortMin: 0.3,
     comfortMax: 0.7,
+    size: 3.0,
+    carnivory: 1.0,
   },
   {
     name: 'Pike',
     hex: '#ff00ff',
     biomes: [Biome.Water],
     foods: [],
-    preyClasses: [TROPHIC_HERBIVORE],
     vision: 8,
     speed: 2,
     moveChance: 1,
-    metabolism: 0.05,
+    metabolism: 0.6,
     maxEnergy: 200,
     reproEnergy: 120,
     maxAge: 7000,
@@ -141,6 +143,8 @@ export const FOUNDERS: readonly FounderSpec[] = [
     tempMax: 1.12,
     comfortMin: 0.42,
     comfortMax: 0.85,
+    size: 2.5,
+    carnivory: 1.0,
   },
 ];
 
@@ -159,6 +163,8 @@ export function writeTraits(genes: Float32Array, off: number, traits: SpeciesTra
   writeGene(genes, off, GENE.tempMax, traits.tempMax);
   writeGene(genes, off, GENE.comfortMin, traits.comfortMin);
   writeGene(genes, off, GENE.comfortMax, traits.comfortMax);
+  writeGene(genes, off, GENE.size, traits.size);
+  writeGene(genes, off, GENE.carnivory, traits.carnivory);
 }
 
 function hslToHex(h: number, s: number, l: number): string {
@@ -203,11 +209,12 @@ export interface SpeciesInfo {
   generation: number;
   diet: string;
   habitat: string;
+  dietClass: string;
   prey: string;
   traits: SpeciesTraits;
 }
 
-/** Names of the biomes a `biomeMask` allows, or `none`. */
+/** Names of the biomes whose bit is set in `mask`, or `none` when it is empty. */
 export function habitatLabel(mask: number): string {
   const names: string[] = [];
   for (let b = 0; b < BIOME_COUNT; b++) if ((mask >>> b) & 1) names.push(BIOMES[b].name);
@@ -221,12 +228,20 @@ export function dietLabel(mask: number): string {
   return names.length ? names.join(', ') : '—';
 }
 
-/** The trophic classes a `preyMask` hunts, e.g. `herbivores`, or `''`. */
-export function preyLabel(mask: number): string {
-  const names: string[] = [];
-  if (mask & TROPHIC_HERBIVORE) names.push('herbivores');
-  if (mask & TROPHIC_CARNIVORE) names.push('carnivores');
-  return names.join(', ');
+/** Description of the creatures a predator can eat, or `''` for a Herbivore. */
+export function preyLabel(carnivory: number, size: number): string {
+  if (dietClassOf(carnivory) === 'Herbivore') return '';
+  return `creatures under ${(size / PREY_SIZE_RATIO).toFixed(1)}`;
+}
+
+/** First `generateName` (Title-cased) not already used by a species. */
+function uniqueName(used: readonly string[], rng: () => number): string {
+  for (let i = 0; i < 200; i++) {
+    const w = generateName(rng);
+    const name = w[0].toUpperCase() + w.slice(1);
+    if (!used.includes(name)) return name;
+  }
+  return `Species ${used.length}`;
 }
 
 /**
@@ -250,7 +265,13 @@ export class SpeciesRegistry {
   readonly refGenes: Float32Array[] = [];
   readonly refBiome: number[] = [];
   readonly refFood: number[] = [];
-  readonly refPrey: number[] = [];
+  /**
+   * slot -> bit `b` set once a live member of this species has stood on biome `b`. This is the
+   * species' observed habitat: its genome's `biomeMask` is only a passability capability, and
+   * mutation can add bits (Deep Water and Beach host no food) that no member ever visits, so
+   * the capability is not what the menu should report.
+   */
+  readonly habitat: Uint16Array = new Uint16Array(MAX_SPECIES);
 
   /** Register founder `index` (0..FOUNDERS.length-1) at species id `index`. */
   addFounder(spec: FounderSpec, index: number): void {
@@ -260,8 +281,6 @@ export class SpeciesRegistry {
     for (const b of spec.biomes) biomeMask |= 1 << b;
     let foodMask = 0;
     for (const f of spec.foods) foodMask |= 1 << f;
-    let preyMask = 0;
-    for (const c of spec.preyClasses) preyMask |= c;
 
     this.name[index] = spec.name;
     this.parent[index] = -1;
@@ -274,19 +293,19 @@ export class SpeciesRegistry {
     this.refGenes[index] = genes;
     this.refBiome[index] = biomeMask;
     this.refFood[index] = foodMask;
-    this.refPrey[index] = preyMask;
     if (index >= this.count) this.count = index + 1;
   }
 
-  /** Found a new species descended from `parentId`, copying `src` as its reference genome. */
-  addChild(src: GenomeSource, parentId: number, tick: number): number {
+  /**
+   * Found a new species descended from `parentId`, copying `src` as its reference genome and
+   * naming it with a fresh seeded word.
+   */
+  addChild(src: GenomeSource, parentId: number, tick: number, rng: () => number): number {
     const id = this.count++;
-    let ordinal = 2;
-    for (let s = 0; s < id; s++) if (this.parent[s] === parentId) ordinal++;
     const genes = new Float32Array(GENE_COUNT);
     for (let g = 0; g < GENE_COUNT; g++) genes[g] = src.genes[src.off + g];
 
-    this.name[id] = `${this.name[parentId]} ${ordinal}`;
+    this.name[id] = uniqueName(this.name, rng);
     this.parent[id] = parentId;
     this.colorSlot[id] = 4 + ((id - 4) % (SPECIES_PALETTE_COUNT - 4));
     this.founderTick[id] = tick;
@@ -297,7 +316,6 @@ export class SpeciesRegistry {
     this.refGenes[id] = genes;
     this.refBiome[id] = src.biomeMask;
     this.refFood[id] = src.foodMask;
-    this.refPrey[id] = src.preyMask;
     return id;
   }
 
@@ -308,7 +326,6 @@ export class SpeciesRegistry {
       off: 0,
       biomeMask: this.refBiome[id],
       foodMask: this.refFood[id],
-      preyMask: this.refPrey[id],
     };
   }
 
@@ -318,12 +335,10 @@ export class SpeciesRegistry {
       src.off,
       src.biomeMask,
       src.foodMask,
-      src.preyMask,
       this.refGenes[id],
       0,
       this.refBiome[id],
       this.refFood[id],
-      this.refPrey[id],
     );
   }
 
@@ -332,10 +347,10 @@ export class SpeciesRegistry {
    * else `parentB`, else a new species. Once `MAX_SPECIES` is reached, the nearest existing
    * species is used instead (ties go to the lowest id).
    */
-  classify(src: GenomeSource, parentA: number, parentB: number, tick: number): number {
+  classify(src: GenomeSource, parentA: number, parentB: number, tick: number, rng: () => number): number {
     if (this.distanceTo(src, parentA) <= SPECIATION_DISTANCE) return parentA;
     if (parentB !== parentA && this.distanceTo(src, parentB) <= SPECIATION_DISTANCE) return parentB;
-    if (this.count < MAX_SPECIES) return this.addChild(src, parentA, tick);
+    if (this.count < MAX_SPECIES) return this.addChild(src, parentA, tick, rng);
 
     let best = parentA;
     let bestD = this.distanceTo(src, parentA);

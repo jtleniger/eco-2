@@ -20,12 +20,12 @@ export const BIOMES = [
 
 export const FOODS = [
   // index === food id; DO NOT reorder
-  { name: 'Algae', hex: '#2caa64', biomes: [1], density: 0.06, maxCoverage: 0.14 },
-  { name: 'Cactus Fruit', hex: '#cc5f2d', biomes: [3], density: 0.015, maxCoverage: 0.04 },
-  { name: 'Grain', hex: '#ddc15f', biomes: [4], density: 0.07, maxCoverage: 0.16 },
-  { name: 'Berries', hex: '#ab4576', biomes: [5], density: 0.05, maxCoverage: 0.12 },
-  { name: 'Mushroom', hex: '#a06a3b', biomes: [6], density: 0.05, maxCoverage: 0.12 },
-  { name: 'Lichen', hex: '#9fd0c2', biomes: [7, 8], density: 0.025, maxCoverage: 0.07 },
+  { name: 'Algae', hex: '#2caa64', biomes: [1], density: 0.045, maxCoverage: 0.1 },
+  { name: 'Cactus Fruit', hex: '#cc5f2d', biomes: [3], density: 0.012, maxCoverage: 0.03 },
+  { name: 'Grain', hex: '#ddc15f', biomes: [4], density: 0.055, maxCoverage: 0.12 },
+  { name: 'Berries', hex: '#ab4576', biomes: [5], density: 0.04, maxCoverage: 0.09 },
+  { name: 'Mushroom', hex: '#a06a3b', biomes: [6], density: 0.04, maxCoverage: 0.09 },
+  { name: 'Lichen', hex: '#9fd0c2', biomes: [7, 8], density: 0.02, maxCoverage: 0.05 },
 ] as const;
 
 export const BIOME_COUNT = BIOMES.length;
@@ -51,6 +51,9 @@ export const Biome = {
   Mountain: 7,
   Snow: 8,
 } as const;
+
+/** Bits of every land biome: all of them but Deep Water and Water. */
+export const LAND_MASK = (1 << BIOME_COUNT) - 1 - (1 << Biome.DeepWater) - (1 << Biome.Water);
 
 /** Named ids for the FOODS order above; values MUST match its indices. */
 export const Food = {
