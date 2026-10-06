@@ -160,6 +160,42 @@ export class Population {
   }
 
   /**
+   * Neighbouring passable cell whose temperature is strictly closer to `center` than the
+   * current cell's, or `-1`. Ties keep the first scanned neighbour (row-major, dx ascending).
+   */
+  private comfortStep(
+    i: number,
+    biome: Uint8Array,
+    tempBase: Float32Array,
+    tempOffset: number,
+    center: number,
+  ): number {
+    const passable = SPECIES_PASSABLE[this.species[i]];
+    const here = this.pos[i];
+    const hx = here % W;
+    const hy = (here / W) | 0;
+    let best = -1;
+    let bestD = Math.abs(tempBase[here] + tempOffset - center);
+    for (let dy = -1; dy <= 1; dy++) {
+      const y = hy + dy;
+      if (y < 0 || y >= H) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const x = hx + dx;
+        if (x < 0 || x >= W) continue;
+        const c = y * W + x;
+        if (passable[biome[c]] !== 1) continue;
+        const d = Math.abs(tempBase[c] + tempOffset - center);
+        if (d < bestD) {
+          bestD = d;
+          best = c;
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
    * Consume the food at slot `i`'s cell, or a creature sharing it: the cell's occupant, or
    * `displaced` — the creature whose occupant entry this tick's move overwrote.
    */
@@ -188,7 +224,14 @@ export class Population {
   }
 
   /** Advance every live creature one tick: age, starve, move, eat, reproduce. */
-  step(biome: Uint8Array, food: Uint8Array, foodCounts: Uint32Array, rng: () => number): void {
+  step(
+    biome: Uint8Array,
+    food: Uint8Array,
+    foodCounts: Uint32Array,
+    rng: () => number,
+    tempBase: Float32Array,
+    tempOffset: number,
+  ): void {
     let i = 0;
     while (i < this.count) {
       if (this.dead[i]) {
@@ -205,21 +248,37 @@ export class Population {
         continue;
       }
 
+      const temp = tempBase[this.pos[i]] + tempOffset;
+      if (temp < sp.tempMin || temp > sp.tempMax) {
+        this.dead[i] = 1;
+        this.remove(i);
+        continue;
+      }
+
+      const center = (sp.comfortMin + sp.comfortMax) / 2;
+      const distressed = temp < sp.comfortMin || temp > sp.comfortMax;
       let displaced = -1;
-      for (let n = 0; n < sp.speed; n++) {
-        const target = this.findTarget(i, biome, food);
-        if (target >= 0 && target !== this.pos[i]) {
-          let to = this.stepToward(i, target, biome);
-          if (to < 0) to = this.randomStep(i, biome, rng); // blocked, e.g. water edge
-          if (to >= 0) {
-            const d = this.move(i, to);
-            if (n === 0 || d >= 0) displaced = d;
+      if (distressed) {
+        // Out of its preferred band: one step toward a better temperature, ignoring food/prey.
+        let to = this.comfortStep(i, biome, tempBase, tempOffset, center);
+        if (to < 0) to = this.randomStep(i, biome, rng);
+        if (to >= 0) displaced = this.move(i, to);
+      } else {
+        for (let n = 0; n < sp.speed; n++) {
+          const target = this.findTarget(i, biome, food);
+          if (target >= 0 && target !== this.pos[i]) {
+            let to = this.stepToward(i, target, biome);
+            if (to < 0) to = this.randomStep(i, biome, rng); // blocked, e.g. water edge
+            if (to >= 0) {
+              const d = this.move(i, to);
+              if (n === 0 || d >= 0) displaced = d;
+            }
+          } else if (n === 0 && rng() < sp.moveChance) {
+            const to = this.randomStep(i, biome, rng);
+            if (to >= 0) displaced = this.move(i, to);
+          } else if (n > 0) {
+            break; // nothing to pursue: no second step, no extra rng draw
           }
-        } else if (n === 0 && rng() < sp.moveChance) {
-          const to = this.randomStep(i, biome, rng);
-          if (to >= 0) displaced = this.move(i, to);
-        } else if (n > 0) {
-          break; // nothing to pursue: no second step, no extra rng draw
         }
       }
 

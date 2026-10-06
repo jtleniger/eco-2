@@ -42,7 +42,7 @@ function normalizePercentiles(a: Float32Array): void {
 }
 
 /** First match wins; order is load-bearing. */
-function classify(elev: number, moist: number, temp: number): BiomeId {
+export function classify(elev: number, moist: number, temp: number): BiomeId {
   if (elev < SEA_DEEP) return Biome.DeepWater;
   if (elev < SEA_SHALLOW) return Biome.Water;
   if (elev < BEACH_TOP) return Biome.Beach;
@@ -55,8 +55,16 @@ function classify(elev: number, moist: number, temp: number): BiomeId {
   return Biome.Swamp;
 }
 
+/** Procedural landscape fields; `biome` is derived from the other three plus a season offset. */
+export interface Terrain {
+  biome: Uint8Array;
+  elev: Float32Array; // percentile-normalized elevation, static in seed
+  moist: Float32Array; // percentile-normalized moisture, static in seed
+  tempBase: Float32Array; // latitude minus altitude penalty; season offset added at runtime
+}
+
 /** Procedural landscape: one BiomeId per cell, deterministic in `seed`. */
-export function generateTerrain(seed: number): Uint8Array {
+export function generateTerrain(seed: number): Terrain {
   const elevRaw = new Float32Array(GRID);
   const moistRaw = new Float32Array(GRID);
 
@@ -85,6 +93,7 @@ export function generateTerrain(seed: number): Uint8Array {
   normalizePercentiles(moistRaw);
 
   const biome = new Uint8Array(GRID);
+  const tempBase = new Float32Array(GRID);
   for (let y = 0; y < H; y++) {
     const ny = y / (H - 1);
     const lat = 1 - Math.abs(ny * 2 - 1);
@@ -92,8 +101,9 @@ export function generateTerrain(seed: number): Uint8Array {
       const i = y * W + x;
       const elev = elevRaw[i];
       const temp = lat - Math.max(0, elev - 0.5) * TEMP_ALT_PENALTY;
+      tempBase[i] = temp;
       biome[i] = classify(elev, moistRaw[i], temp);
     }
   }
-  return biome;
+  return { biome, elev: elevRaw, moist: moistRaw, tempBase };
 }

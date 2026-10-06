@@ -1,10 +1,11 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GRID, MAX_CREATURES, REGEN_SAMPLES_PER_TICK, W } from './config.ts';
+import { GRID, MAX_CREATURES, REGEN_SAMPLES_PER_TICK, SEASON_AMPLITUDE, SEASON_PERIOD_TICKS, W } from './config.ts';
+import { seasonName, seasonOffset } from './climate.ts';
 import { Population, spawnInitialCreatures } from './creatures.ts';
 import { computeEligibleCells, regrowTick } from './food.ts';
-import { FOODS, FOOD_COUNT, NONE } from './palette.ts';
+import { Biome, FOODS, FOOD_COUNT, NONE } from './palette.ts';
 import { mulberry32 } from './rng.ts';
 import {
   SPECIES,
@@ -95,12 +96,13 @@ test('a pike runs down a minnow it can see', () => {
     }
   }
   const pop = new Population();
+  const tempBase = new Float32Array(GRID).fill(0.5);
   assert.ok(pop.spawn(3, 100 * W + 100, SPECIES[3].startEnergy), 'pike spawned');
   assert.ok(pop.spawn(1, 106 * W + 100, SPECIES[1].startEnergy), 'minnow spawned');
 
   let ticks = 0;
   while (pop.counts[1] > 0 && ticks < 200) {
-    pop.step(biome, food, foodCounts, rng);
+    pop.step(biome, food, foodCounts, rng, tempBase, 0);
     ticks++;
   }
   assert.equal(pop.counts[1], 0, `minnow killed within ${ticks} ticks`);
@@ -113,7 +115,7 @@ test('herbivores eat the plants they stand on and the counters keep up', () => {
   world.reset(12345);
   for (let t = 0; t < 60; t++) world.step();
   assertFoodCountsMatch(world.food, world.counts);
-  world.population.step(world.biome, world.food, world.counts, world.rng);
+  world.population.step(world.biome, world.food, world.counts, world.rng, world.tempBase, world.seasonOffset);
   regrowTick(world.biome, world.food, world.counts, world.rng, REGEN_SAMPLES_PER_TICK);
   assertFoodCountsMatch(world.food, world.counts);
   assertPopulationSound(world.population, world.biome);
@@ -144,7 +146,8 @@ test('creature populations stay bounded by their caps', () => {
 });
 
 test('spawn placement respects biomes, occupancy and the pool limit', () => {
-  const biome = generateTerrain(12345);
+  const terrain = generateTerrain(12345);
+  const biome = terrain.biome;
   const pop = new Population();
   spawnInitialCreatures(biome, pop, mulberry32(5));
   assertPopulationSound(pop, biome);
@@ -180,17 +183,20 @@ test('all four species survive 5000 ticks and the world keeps its books', () => 
 test('grazing is replenished, not drained away from the grazers', () => {
   const grazed = new World();
   grazed.reset(7);
-  const eligible = computeEligibleCells(grazed.biome);
   const stocked = new World();
   stocked.reset(7);
   stocked.population.count = 0;
   stocked.population.counts.fill(0);
   stocked.population.occupant.fill(-1);
 
-  for (let t = 0; t < 3000; t++) {
+  for (let t = 0; t < SEASON_PERIOD_TICKS; t++) {
     grazed.step();
     stocked.step();
   }
+
+  // A full climate year returns the world to its start-of-run biomes, so the end-of-year
+  // eligible map is the area that actually hosted each food at this sampled phase.
+  const eligible = computeEligibleCells(grazed.biome);
 
   for (let f = 0; f < FOOD_COUNT; f++) {
     const cap = FOODS[f].maxCoverage * eligible[f];
@@ -218,4 +224,61 @@ test('grazing is replenished, not drained away from the grazers', () => {
       `${SPECIES[s].name} stays fed (mean energy ${(sum / n).toFixed(0)})`,
     );
   }
+});
+
+test('the season offset is a sinusoid that starts at zero', () => {
+  assert.equal(seasonOffset(0), 0);
+  assert.ok(Math.abs(seasonOffset(900) - SEASON_AMPLITUDE) < 1e-9, 'quarter year is the peak');
+  assert.ok(Math.abs(seasonOffset(1800)) < 1e-9, 'half year crosses zero');
+  assert.ok(Math.abs(seasonOffset(2700) + SEASON_AMPLITUDE) < 1e-9, 'three-quarters is the trough');
+  assert.equal(seasonName(0), 'Spring');
+  assert.equal(seasonName(900), 'Summer');
+  assert.equal(seasonName(1800), 'Autumn');
+  assert.equal(seasonName(2700), 'Winter');
+});
+
+test('biome bands advance and retreat with the season', () => {
+  const world = new World();
+  world.reset(12345);
+  const base = Uint8Array.from(world.biome);
+  for (let t = 0; t < 900; t++) world.step();
+
+  let changed = 0;
+  for (let i = 0; i < GRID; i++) if (world.biome[i] !== base[i]) changed++;
+  assert.ok(changed > 0, `summer reclassifies cells, got ${changed}`);
+  assert.deepEqual(Array.from(world.eligible), Array.from(computeEligibleCells(world.biome)));
+  assertFoodCountsMatch(world.food, world.counts);
+});
+
+test('a creature outside its comfort band moves toward a better temperature', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const pop = new Population();
+  const start = 100 * W + 100;
+  tempBase[start] = 0.85; // inside the Grazer's survival band, above its comfort band
+  assert.ok(pop.spawn(0, start, SPECIES[0].startEnergy), 'grazer spawned');
+
+  pop.step(biome, food, counts, mulberry32(3), tempBase, 0);
+
+  assert.equal(pop.counts[0], 1, 'grazer survives the step');
+  assert.notEqual(pop.pos[0], start, 'grazer left the hot cell');
+  assert.ok(tempBase[pop.pos[0]] < 0.85, 'grazer stepped somewhere cooler');
+});
+
+test('a creature outside its survival band dies', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const pop = new Population();
+  const start = 50 * W + 50;
+  tempBase[start] = 2; // far above the Grazer's survival maximum (1.08)
+  assert.ok(pop.spawn(0, start, SPECIES[0].startEnergy), 'grazer spawned');
+
+  pop.step(biome, food, counts, mulberry32(3), tempBase, 0);
+
+  assert.equal(pop.counts[0], 0, 'grazer died of heat');
+  assert.equal(pop.count, 0);
 });

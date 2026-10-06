@@ -18,6 +18,14 @@ reproduce, and dies of starvation or old age. Predators move two cells per tick,
 herbivores one. One creature = one pixel; the menu's Creatures section shows the
 live counts.
 
+The climate is seasonal: a sinusoid of amplitude `±0.12` with a ~6-minute period
+at `1x` (`SEASON_PERIOD_TICKS = 3600`) shifts every cell's temperature, and every
+30 ticks the snow/desert/forest/swamp bands are reclassified — the map's colours
+advance and retreat through Spring/Summer/Autumn/Winter. Each species has a
+survival band it dies outside of and a narrower comfort band it walks toward when
+it drifts out of it. The toolbar shows the current season; the menu's World
+section shows the mean temperature and the current offset.
+
 ## Run
 
 ```bash
@@ -50,7 +58,7 @@ backing store; the canvas is integer-upscaled with `image-rendering: pixelated`.
 | --- | --- |
 | `src/lib/config.ts` | every tunable: world size, tick rate, speeds, terrain thresholds |
 | `src/lib/palette.ts` | biome/food ids, colors, densities, biome eligibility — single source of truth for cell values |
-| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `food.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, food regrowth, the species table and the creature agents |
+| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `climate.ts`, `food.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, the season clock, food regrowth, the species table and the creature agents |
 | `src/lib/world.ts` | all simulated state + one tick; no canvas, DOM or UI coupling |
 | `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, determinism, caps, a 5000-tick four-species survival run |
 | `src/lib/renderer.ts` | Canvas 2D `ImageData` blitter, one pixel per cell (creature over food over biome) |

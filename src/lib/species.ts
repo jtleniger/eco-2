@@ -27,6 +27,8 @@ export const SPECIES = [
   //   startEnergy energy at spawn
   //   initial    individuals at world reset
   //   maxPop     live cap for this species
+  //   tempMin/tempMax       normalized temperature [0,1]+season the species dies outside of
+  //   comfortMin/comfortMax normalized temperature band it seeks when outside
   {
     name: 'Grazer',
     hex: '#f6ff00',
@@ -44,6 +46,10 @@ export const SPECIES = [
     startEnergy: 70,
     initial: 80,
     maxPop: 300,
+    tempMin: -0.08,
+    tempMax: 1.08,
+    comfortMin: 0.28,
+    comfortMax: 0.72,
   },
   {
     name: 'Minnow',
@@ -62,6 +68,10 @@ export const SPECIES = [
     startEnergy: 70,
     initial: 80,
     maxPop: 300,
+    tempMin: -0.12,
+    tempMax: 0.98,
+    comfortMin: 0.16,
+    comfortMax: 0.58,
   },
   {
     name: 'Hunter',
@@ -80,6 +90,10 @@ export const SPECIES = [
     startEnergy: 110,
     initial: 12,
     maxPop: 60,
+    tempMin: -0.05,
+    tempMax: 1.08,
+    comfortMin: 0.3,
+    comfortMax: 0.7,
   },
   {
     name: 'Pike',
@@ -98,6 +112,10 @@ export const SPECIES = [
     startEnergy: 110,
     initial: 16,
     maxPop: 16,
+    tempMin: -0.05,
+    tempMax: 1.12,
+    comfortMin: 0.42,
+    comfortMax: 0.85,
   },
 ] as const;
 

@@ -5,6 +5,7 @@ import {
   STATS_INTERVAL_MS,
   TICK_MS,
 } from './config.ts';
+import { seasonName } from './climate.ts';
 import { coverage } from './food.ts';
 import { BIOME_COUNT, FOOD_COUNT } from './palette.ts';
 import { Renderer } from './renderer.ts';
@@ -45,14 +46,14 @@ export class Engine {
     this.status = 'paused';
     this.dirty = true;
 
-    const share: number[] = new Array(BIOME_COUNT).fill(0);
-    for (let i = 0; i < GRID; i++) share[this.world.biome[i]]++;
-    for (let b = 0; b < BIOME_COUNT; b++) share[b] /= GRID;
+    this.refreshBiomeShare();
 
     ui.status = this.status;
     ui.seed = this.world.seed;
     ui.tick = 0;
-    ui.biomeShare = share;
+    ui.season = seasonName(0);
+    ui.seasonOffset = 0;
+    ui.meanTemp = this.world.meanTempBase;
     this.pushStats();
 
     this.renderer.paint(this.world.biome, this.world.food, this.world.population);
@@ -82,9 +83,20 @@ export class Engine {
     this.world.step();
     this.dirty = true;
     ui.tick = this.world.tick;
+    ui.season = seasonName(this.world.tick);
+    ui.seasonOffset = this.world.seasonOffset;
+    ui.meanTemp = this.world.meanTempBase + this.world.seasonOffset;
+  }
+
+  private refreshBiomeShare(): void {
+    const share: number[] = new Array(BIOME_COUNT).fill(0);
+    for (let i = 0; i < GRID; i++) share[this.world.biome[i]]++;
+    for (let b = 0; b < BIOME_COUNT; b++) share[b] /= GRID;
+    ui.biomeShare = share;
   }
 
   private pushStats(): void {
+    this.refreshBiomeShare();
     const cov: number[] = new Array(FOOD_COUNT);
     for (let f = 0; f < FOOD_COUNT; f++) {
       cov[f] = coverage(this.world.counts, this.world.eligible, f);

@@ -34,4 +34,5 @@
   <span class="spacer"></span>
   <span class="stat">status <span data-testid="status">{ui.status}</span></span>
   <span class="stat">tick <span data-testid="tick">{ui.tick}</span></span>
+  <span class="stat">season <span data-testid="season">{ui.season}</span></span>
 </div>

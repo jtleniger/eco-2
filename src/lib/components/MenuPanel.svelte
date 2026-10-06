@@ -47,6 +47,7 @@
         <div class="col">
           <span class="name">{s.name}</span>
           <span class="sub">{dietLabel(s)}</span>
+          <span class="sub">temp {s.tempMin.toFixed(2)}–{s.tempMax.toFixed(2)} · prefers {s.comfortMin.toFixed(2)}–{s.comfortMax.toFixed(2)}</span>
         </div>
         <span class="val">{ui.creatureCounts[i] ?? 0}</span>
       </div>
@@ -56,6 +57,8 @@
     <div class="row"><span class="name">size</span><span class="val">{W} × {H}</span></div>
     <div class="row"><span class="name">seed</span><span class="val" data-testid="seed">{ui.seed}</span></div>
     <div class="row"><span class="name">tick</span><span class="val">{ui.tick}</span></div>
+    <div class="row"><span class="name">season</span><span class="val" data-testid="season-label">{ui.season}</span></div>
+    <div class="row"><span class="name">temperature</span><span class="val">{ui.meanTemp.toFixed(2)} ({(ui.seasonOffset >= 0 ? '+' : '')}{ui.seasonOffset.toFixed(2)})</span></div>
     <div class="row"><span class="name">status</span><span class="val">{ui.status}</span></div>
     <div class="row"><span class="name">speed</span><span class="val">{ui.speed}x</span></div>
   </aside>

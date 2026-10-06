@@ -14,4 +14,7 @@ export const ui = $state({
   creatureCounts: [] as number[],
   coverage: [] as number[],
   biomeShare: [] as number[],
+  season: 'Spring' as string,
+  seasonOffset: 0,
+  meanTemp: 0,
 });
