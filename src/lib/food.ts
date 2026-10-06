@@ -1,4 +1,4 @@
-import { GRID } from './config.ts';
+import { GRID, H, LOCAL_DENSITY_RADIUS, LOCAL_DENSITY_SCALE, W } from './config.ts';
 import { FOODS, FOODS_BY_BIOME, FOOD_COUNT, NONE } from './palette.ts';
 
 /** Per food id: how many cells of `biome` can host that food. */
@@ -29,12 +29,18 @@ export function spawnInitialFood(
   }
 }
 
-/** Grow food toward its per-type carrying capacity on `samples` random cells. */
+/**
+ * Grow food toward its per-type carrying capacity on `samples` random cells. A sample takes
+ * root only where the *local* density is still under `maxCoverage`, so grazed patches are
+ * replenished while a patch already at capacity is left alone. A single global cap would
+ * instead stop growth everywhere the moment the crop as a whole reached capacity: the food a
+ * grazer ate then came back at random cells — including habitat no creature can reach — and
+ * the crop drained away from its consumers until they starved.
+ */
 export function regrowTick(
   biome: Uint8Array,
   food: Uint8Array,
   counts: Uint32Array,
-  eligible: Uint32Array,
   rng: () => number,
   samples: number,
 ): void {
@@ -44,7 +50,21 @@ export function regrowTick(
     const list = FOODS_BY_BIOME[biome[i]];
     if (list.length === 0) continue;
     const f = list[(rng() * list.length) | 0];
-    if (coverage(counts, eligible, f) >= FOODS[f].maxCoverage) continue;
+    const x = i % W;
+    const y = (i / W) | 0;
+    let near = 0;
+    let window = 0;
+    for (let dy = -LOCAL_DENSITY_RADIUS; dy <= LOCAL_DENSITY_RADIUS; dy++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= H) continue;
+      for (let dx = -LOCAL_DENSITY_RADIUS; dx <= LOCAL_DENSITY_RADIUS; dx++) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= W) continue;
+        window++;
+        if (food[ny * W + nx] === f) near++;
+      }
+    }
+    if (near >= window * FOODS[f].maxCoverage * LOCAL_DENSITY_SCALE) continue;
     food[i] = f;
     counts[f]++;
   }

@@ -11,6 +11,7 @@ export const ui = $state({
   seed: 0,
   menuOpen: false,
   counts: [] as number[],
+  creatureCounts: [] as number[],
   coverage: [] as number[],
   biomeShare: [] as number[],
 });

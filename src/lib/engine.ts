@@ -1,30 +1,25 @@
 import {
   GRID,
   MAX_TICKS_PER_FRAME,
-  REGEN_SAMPLES_PER_TICK,
   SPEEDS,
   STATS_INTERVAL_MS,
   TICK_MS,
 } from './config.ts';
-import { computeEligibleCells, coverage, regrowTick, spawnInitialFood } from './food.ts';
-import { BIOME_COUNT, FOOD_COUNT, NONE } from './palette.ts';
+import { coverage } from './food.ts';
+import { BIOME_COUNT, FOOD_COUNT } from './palette.ts';
 import { Renderer } from './renderer.ts';
-import { mulberry32 } from './rng.ts';
-import { generateTerrain } from './terrain.ts';
 import { ui } from './ui.svelte.ts';
+import { World } from './world.ts';
 
 export type Status = 'paused' | 'running';
 
-/** World state plus the fixed-timestep loop that advances it. */
+/**
+ * Fixed-timestep driver: owns the canvas, the clock and the UI mirror, and delegates all
+ * simulated state to `World`.
+ */
 export class Engine {
-  biome: Uint8Array;
-  food: Uint8Array;
-  counts: Uint32Array;
-  eligible: Uint32Array;
+  readonly world = new World();
   renderer: Renderer;
-  rng: () => number;
-  seed: number;
-  tick: number;
   status: Status;
   speed: number;
   dirty: boolean;
@@ -34,13 +29,6 @@ export class Engine {
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new Renderer(canvas);
-    this.biome = new Uint8Array(GRID);
-    this.food = new Uint8Array(GRID).fill(NONE);
-    this.counts = new Uint32Array(FOOD_COUNT);
-    this.eligible = new Uint32Array(FOOD_COUNT);
-    this.rng = mulberry32(1);
-    this.seed = 0;
-    this.tick = 0;
     this.status = 'paused';
     this.speed = 1;
     this.dirty = true;
@@ -52,29 +40,22 @@ export class Engine {
   }
 
   reset(): void {
-    this.seed = (Math.random() * 0xffffffff) >>> 0;
-    this.biome = generateTerrain(this.seed);
-    this.food = new Uint8Array(GRID).fill(NONE);
-    this.eligible = computeEligibleCells(this.biome);
-    this.counts = new Uint32Array(FOOD_COUNT);
-    this.rng = mulberry32(this.seed ^ 0x9e3779b9);
-    spawnInitialFood(this.biome, this.food, this.counts, this.rng);
-    this.tick = 0;
+    this.world.reset((Math.random() * 0xffffffff) >>> 0);
     this.acc = 0;
     this.status = 'paused';
     this.dirty = true;
 
     const share: number[] = new Array(BIOME_COUNT).fill(0);
-    for (let i = 0; i < GRID; i++) share[this.biome[i]]++;
+    for (let i = 0; i < GRID; i++) share[this.world.biome[i]]++;
     for (let b = 0; b < BIOME_COUNT; b++) share[b] /= GRID;
 
     ui.status = this.status;
-    ui.seed = this.seed;
+    ui.seed = this.world.seed;
     ui.tick = 0;
     ui.biomeShare = share;
     this.pushStats();
 
-    this.renderer.paint(this.biome, this.food);
+    this.renderer.paint(this.world.biome, this.world.food, this.world.population);
     this.dirty = false;
   }
 
@@ -98,16 +79,18 @@ export class Engine {
   }
 
   private step(): void {
-    regrowTick(this.biome, this.food, this.counts, this.eligible, this.rng, REGEN_SAMPLES_PER_TICK);
-    this.tick++;
+    this.world.step();
     this.dirty = true;
-    ui.tick = this.tick;
+    ui.tick = this.world.tick;
   }
 
   private pushStats(): void {
     const cov: number[] = new Array(FOOD_COUNT);
-    for (let f = 0; f < FOOD_COUNT; f++) cov[f] = coverage(this.counts, this.eligible, f);
-    ui.counts = Array.from(this.counts);
+    for (let f = 0; f < FOOD_COUNT; f++) {
+      cov[f] = coverage(this.world.counts, this.world.eligible, f);
+    }
+    ui.counts = Array.from(this.world.counts);
+    ui.creatureCounts = Array.from(this.world.population.counts);
     ui.coverage = cov;
   }
 
@@ -128,7 +111,7 @@ export class Engine {
     }
 
     if (this.dirty) {
-      this.renderer.paint(this.biome, this.food);
+      this.renderer.paint(this.world.biome, this.world.food, this.world.population);
       this.dirty = false;
     }
 

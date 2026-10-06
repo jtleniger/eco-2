@@ -1,9 +1,15 @@
 <script lang="ts">
   import { H, W } from '../config.ts';
   import { BIOMES, FOODS } from '../palette.ts';
+  import { SPECIES } from '../species.ts';
   import { ui } from '../ui.svelte.ts';
 
   const pct = (v: number | undefined) => `${((v ?? 0) * 100).toFixed(1)}%`;
+
+  const dietLabel = (s: (typeof SPECIES)[number]) =>
+    s.prey.length
+      ? `hunts ${s.prey.map((p) => SPECIES[p as number].name).join(', ')}`
+      : `eats ${s.foods.map((f) => FOODS[f as number].name).join(', ')}`;
 </script>
 
 {#if ui.menuOpen}
@@ -31,6 +37,18 @@
           <span class="sub">on {f.biomes.map((b) => BIOMES[b].name).join(', ')}</span>
         </div>
         <span class="val">{ui.counts[i] ?? 0} · {pct(ui.coverage[i])}</span>
+      </div>
+    {/each}
+
+    <h3>Creatures</h3>
+    {#each SPECIES as s, i (s.name)}
+      <div class="row creature" data-testid="creature-row">
+        <i class="swatch" style="background:{s.hex}"></i>
+        <div class="col">
+          <span class="name">{s.name}</span>
+          <span class="sub">{dietLabel(s)}</span>
+        </div>
+        <span class="val">{ui.creatureCounts[i] ?? 0}</span>
       </div>
     {/each}
 

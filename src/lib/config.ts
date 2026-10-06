@@ -5,6 +5,13 @@ export const TICK_MS = 100; // 10 sim-ticks/second at 1x
 export const SPEEDS = [0.5, 1, 2] as const;
 export const MAX_TICKS_PER_FRAME = 20; // accumulator spiral guard
 export const REGEN_SAMPLES_PER_TICK = 1500;
+export const MAX_CREATURES = 800; // hard capacity of the creature slot arrays (sum of maxPop is 676)
+export const MIN_HABITAT_AREA = 256; // cells; species are never seeded into smaller habitats
+export const LOCAL_DENSITY_RADIUS = 3; // cells; window for the per-food density check in regrowTick
+// That window is noisy (49 cells), so growth only stops once its typical count is well above
+// the threshold: a half-scale threshold lands the crop's equilibrium cover at its stated
+// maxCoverage instead of about twice it.
+export const LOCAL_DENSITY_SCALE = 0.5;
 export const STATS_INTERVAL_MS = 250;
 export const FREQ = 6; // base noise frequency across the map
 export const WARP = 1.5; // domain-warp displacement

@@ -1,9 +1,22 @@
 # eco-2
 
-Browser ecosystem sandbox. This milestone is the world only: a procedurally
-generated 512 × 384 pixel landscape whose color encodes its biome (water,
-beach, desert, fields, forest, swamp, mountain, snow), plus biome-appropriate
-food that regrows toward a per-type carrying capacity. No creatures yet.
+Browser ecosystem sandbox: a procedurally generated 512 × 384 pixel landscape
+whose color encodes its biome (water, beach, desert, fields, forest, swamp,
+mountain, snow), biome-appropriate food that regrows toward a per-type carrying
+capacity, and four creature species that live off it.
+
+| Species | Colour | Diet | Habitat |
+| --- | --- | --- | --- |
+| Grazer | `#f6ff00` | land plants | land |
+| Minnow | `#00f0ff` | Algae | water |
+| Hunter | `#ff1a1a` | Grazers | land |
+| Pike | `#ff00ff` | Minnows | water |
+
+Each creature is one agent with energy, age and a cell: it steers toward the
+nearest visible food or prey, eats what it lands on, splits its energy to
+reproduce, and dies of starvation or old age. Predators move two cells per tick,
+herbivores one. One creature = one pixel; the menu's Creatures section shows the
+live counts.
 
 ## Run
 
@@ -11,6 +24,7 @@ food that regrows toward a per-type carrying capacity. No creatures yet.
 npm install
 npm run dev      # http://localhost:5173
 npm run check    # svelte-check + tsc
+npm test         # headless simulation tests (node --test, no browser)
 npm run build    # dist/
 ```
 
@@ -23,11 +37,12 @@ The world boots **paused** with a freshly generated seed.
 | `Start` / `Pause` | run or freeze the simulation |
 | `Reset` | regenerate the world with a new seed and pause |
 | `0.5x` / `1x` / `2x` | simulation speed; `1x` = 10 ticks/second |
-| `Menu` | right-hand drawer: color legend, live biome/food statistics, seed, tick |
+| `Menu` | right-hand drawer: color legend, live biome/food/creature statistics, seed, tick |
 
-Food never decays and is never consumed (nothing eats it yet), so it saturates at
-each type's coverage cap. One world cell = one pixel of the canvas backing store;
-the canvas is integer-upscaled with `image-rendering: pixelated`.
+Food regrows on random cells, but only where its local density is still under its
+coverage cap, so a grazed patch is replenished where it was eaten instead of the
+crop drifting away from its consumers. One world cell = one pixel of the canvas
+backing store; the canvas is integer-upscaled with `image-rendering: pixelated`.
 
 ## Layout
 
@@ -35,8 +50,10 @@ the canvas is integer-upscaled with `image-rendering: pixelated`.
 | --- | --- |
 | `src/lib/config.ts` | every tunable: world size, tick rate, speeds, terrain thresholds |
 | `src/lib/palette.ts` | biome/food ids, colors, densities, biome eligibility — single source of truth for cell values |
-| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `food.ts` | pure, DOM-free simulation core (runs under plain `node`); terrain generation and food regrowth live here |
-| `src/lib/renderer.ts` | Canvas 2D `ImageData` blitter, one pixel per cell |
-| `src/lib/engine.ts` | world state + fixed-timestep loop (accumulator, spiral guard) |
+| `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `food.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, food regrowth, the species table and the creature agents |
+| `src/lib/world.ts` | all simulated state + one tick; no canvas, DOM or UI coupling |
+| `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, determinism, caps, a 5000-tick four-species survival run |
+| `src/lib/renderer.ts` | Canvas 2D `ImageData` blitter, one pixel per cell (creature over food over biome) |
+| `src/lib/engine.ts` | canvas, clock and UI mirror driving `World` (accumulator, spiral guard) |
 | `src/lib/ui.svelte.ts` | `$state` object bridging engine → components |
 | `src/lib/components/` | `Toolbar.svelte`, `MenuPanel.svelte` |

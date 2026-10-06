@@ -1,6 +1,6 @@
 export const NONE = 255; // sentinel: no food on a cell
 
-function hexToRgb(hex: string): [number, number, number] {
+export function hexToRgb(hex: string): [number, number, number] {
   const n = parseInt(hex.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
@@ -32,7 +32,7 @@ export const BIOME_COUNT = BIOMES.length;
 export const FOOD_COUNT = FOODS.length;
 
 /** Numeric index union of an array/tuple type. */
-type Ids<T extends readonly unknown[]> = {
+export type Ids<T extends readonly unknown[]> = {
   [K in keyof T]: K extends `${infer N extends number}` ? N : never;
 }[number];
 
@@ -50,6 +50,16 @@ export const Biome = {
   Swamp: 6,
   Mountain: 7,
   Snow: 8,
+} as const;
+
+/** Named ids for the FOODS order above; values MUST match its indices. */
+export const Food = {
+  Algae: 0,
+  CactusFruit: 1,
+  Grain: 2,
+  Berries: 3,
+  Mushroom: 4,
+  Lichen: 5,
 } as const;
 
 /** `BIOME_COUNT * 3` bytes: RGB per biome id. */
