@@ -29,13 +29,14 @@ export class World {
   /** Rebuild terrain, food and creatures for `seed`. */
   reset(seed: number): void {
     this.seed = seed >>> 0;
-    const terrain = generateTerrain(this.seed);
+    this.tick = 0;
+    this.seasonOffset = seasonOffset(this.tick);
+    const terrain = generateTerrain(this.seed, this.seasonOffset);
     this.biome = terrain.biome;
     this.elev = terrain.elev;
     this.moist = terrain.moist;
     this.tempBase = terrain.tempBase;
     this.snowBias = terrain.snowBias;
-    this.seasonOffset = 0;
     let sum = 0;
     for (let i = 0; i < GRID; i++) sum += this.tempBase[i];
     this.meanTempBase = sum / GRID;
@@ -46,7 +47,6 @@ export class World {
     spawnInitialFood(this.biome, this.food, this.counts, this.rng);
     this.population = new Population();
     spawnInitialCreatures(this.biome, this.population, this.rng);
-    this.tick = 0;
   }
 
   /**

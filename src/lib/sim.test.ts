@@ -226,15 +226,40 @@ test('grazing is replenished, not drained away from the grazers', () => {
   }
 });
 
-test('the season offset is a sinusoid that starts at zero', () => {
-  assert.equal(seasonOffset(0), 0);
-  assert.ok(Math.abs(seasonOffset(900) - SEASON_AMPLITUDE) < 1e-9, 'quarter year is the peak');
-  assert.ok(Math.abs(seasonOffset(1800)) < 1e-9, 'half year crosses zero');
-  assert.ok(Math.abs(seasonOffset(2700) + SEASON_AMPLITUDE) < 1e-9, 'three-quarters is the trough');
+test('the season offset peaks mid-summer and troughs mid-winter', () => {
+  const q = SEASON_PERIOD_TICKS / 4;
+  assert.ok(Math.abs(seasonOffset(1.5 * q) - SEASON_AMPLITUDE) < 1e-9, 'mid-summer is the peak');
+  assert.ok(Math.abs(seasonOffset(3.5 * q) + SEASON_AMPLITUDE) < 1e-9, 'mid-winter is the trough');
+  assert.ok(Math.abs(seasonOffset(0.5 * q)) < 1e-9, 'mid-spring crosses zero rising');
+  assert.ok(Math.abs(seasonOffset(2.5 * q)) < 1e-9, 'mid-autumn crosses zero falling');
   assert.equal(seasonName(0), 'Spring');
-  assert.equal(seasonName(900), 'Summer');
-  assert.equal(seasonName(1800), 'Autumn');
-  assert.equal(seasonName(2700), 'Winter');
+  assert.equal(seasonName(q), 'Summer');
+  assert.equal(seasonName(2 * q), 'Autumn');
+  assert.equal(seasonName(3 * q), 'Winter');
+});
+
+test('snow recedes through spring and summer, then grows through autumn and winter', () => {
+  const world = new World();
+  world.reset(12345);
+  const q = SEASON_PERIOD_TICKS / 4;
+  const snow = (): number => {
+    let n = 0;
+    for (let i = 0; i < GRID; i++) if (world.biome[i] === Biome.Snow) n++;
+    return n;
+  };
+  const at = (tick: number): number => {
+    while (world.tick < tick) world.step();
+    return snow();
+  };
+  const start = at(0);
+  const midSpring = at(0.5 * q);
+  const midSummer = at(1.5 * q);
+  const midAutumn = at(2.5 * q);
+  const midWinter = at(3.5 * q);
+  assert.ok(midSpring < start, `snow melts through spring (${start} -> ${midSpring})`);
+  assert.ok(midSummer < midSpring, `snow keeps melting into summer (${midSpring} -> ${midSummer})`);
+  assert.ok(midAutumn > midSummer, `snow rebuilds through autumn (${midSummer} -> ${midAutumn})`);
+  assert.ok(midWinter > midAutumn, `snow keeps growing into winter (${midAutumn} -> ${midWinter})`);
 });
 
 test('biome bands advance and retreat with the season', () => {

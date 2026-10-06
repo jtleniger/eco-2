@@ -21,7 +21,10 @@ live counts.
 The climate is seasonal: a sinusoid of amplitude `±0.12` with a ~6-minute period
 at `1x` (`SEASON_PERIOD_TICKS = 3600`) shifts every cell's temperature, and every
 30 ticks the snow/desert/forest/swamp bands are reclassified — the map's colours
-advance and retreat through Spring/Summer/Autumn/Winter. The snow line carries a
+advance and retreat through Spring/Summer/Autumn/Winter. The offset is phased to
+the seasons so it crosses zero rising at mid-Spring, peaks mid-Summer and troughs
+mid-Winter: snow recedes through Spring and the first half of Summer, then
+rebuilds through Autumn and the first half of Winter. The snow line carries a
 static per-cell jitter (`SNOW_EDGE_AMPLITUDE`), so it melts back as a ragged,
 terrain-like edge instead of a smooth isotherm. Each species has a
 survival band it dies outside of and a narrower comfort band it walks toward when

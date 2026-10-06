@@ -52,8 +52,8 @@ export class Engine {
     ui.seed = this.world.seed;
     ui.tick = 0;
     ui.season = seasonName(0);
-    ui.seasonOffset = 0;
-    ui.meanTemp = this.world.meanTempBase;
+    ui.seasonOffset = this.world.seasonOffset;
+    ui.meanTemp = this.world.meanTempBase + this.world.seasonOffset;
     this.pushStats();
 
     this.renderer.paint(this.world.biome, this.world.food, this.world.population);

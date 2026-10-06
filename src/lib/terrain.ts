@@ -70,8 +70,11 @@ export interface Terrain {
   snowBias: Float32Array; // static snow-line jitter (±SNOW_EDGE_AMPLITUDE) in temperature units
 }
 
-/** Procedural landscape: one BiomeId per cell, deterministic in `seed`. */
-export function generateTerrain(seed: number): Terrain {
+/**
+ * Procedural landscape: one BiomeId per cell, deterministic in `seed`. `initialSeasonOffset`
+ * bakes the season into the starting biomes so the boot frame matches the tick-0 climate.
+ */
+export function generateTerrain(seed: number, initialSeasonOffset = 0): Terrain {
   const elevRaw = new Float32Array(GRID);
   const moistRaw = new Float32Array(GRID);
   const snowBias = new Float32Array(GRID);
@@ -120,7 +123,7 @@ export function generateTerrain(seed: number): Terrain {
       const elev = elevRaw[i];
       const temp = lat - Math.max(0, elev - 0.5) * TEMP_ALT_PENALTY;
       tempBase[i] = temp;
-      biome[i] = classify(elev, moistRaw[i], temp, snowBias[i]);
+      biome[i] = classify(elev, moistRaw[i], temp + initialSeasonOffset, snowBias[i]);
     }
   }
   return { biome, elev: elevRaw, moist: moistRaw, tempBase, snowBias };
