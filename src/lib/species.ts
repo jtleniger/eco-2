@@ -31,7 +31,7 @@ export const SPECIES = [
   //   comfortMin/comfortMax normalized temperature band it seeks when outside
   {
     name: 'Grazer',
-    hex: '#f6ff00',
+    hex: '#ffff00',
     biomes: LAND,
     foods: [Food.CactusFruit, Food.Grain, Food.Berries, Food.Mushroom, Food.Lichen],
     prey: [],

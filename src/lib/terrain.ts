@@ -14,6 +14,8 @@ import {
   P_LOW,
   SEA_DEEP,
   SEA_SHALLOW,
+  SNOW_EDGE_AMPLITUDE,
+  SNOW_EDGE_FREQ,
   SNOW_TEMP,
   SWAMP_WET,
   TEMP_ALT_PENALTY,
@@ -41,13 +43,17 @@ function normalizePercentiles(a: Float32Array): void {
   }
 }
 
-/** First match wins; order is load-bearing. */
-export function classify(elev: number, moist: number, temp: number): BiomeId {
+/**
+ * First match wins; order is load-bearing. `snowBias` is the per-cell snow-line jitter that
+ * turns the otherwise smooth isotherm into an irregular, terrain-like edge.
+ */
+export function classify(elev: number, moist: number, temp: number, snowBias = 0): BiomeId {
   if (elev < SEA_DEEP) return Biome.DeepWater;
   if (elev < SEA_SHALLOW) return Biome.Water;
   if (elev < BEACH_TOP) return Biome.Beach;
-  if (elev >= MOUNTAIN) return temp < ALPINE_SNOW_TEMP ? Biome.Snow : Biome.Mountain;
-  if (temp < SNOW_TEMP) return Biome.Snow;
+  const t = temp + snowBias;
+  if (elev >= MOUNTAIN) return t < ALPINE_SNOW_TEMP ? Biome.Snow : Biome.Mountain;
+  if (t < SNOW_TEMP) return Biome.Snow;
   if (temp < COLD_MAX) return moist > SWAMP_WET ? Biome.Swamp : Biome.Fields;
   if (moist < DESERT_DRY) return Biome.Desert;
   if (moist < FIELD_MOIST) return Biome.Fields;
@@ -61,12 +67,14 @@ export interface Terrain {
   elev: Float32Array; // percentile-normalized elevation, static in seed
   moist: Float32Array; // percentile-normalized moisture, static in seed
   tempBase: Float32Array; // latitude minus altitude penalty; season offset added at runtime
+  snowBias: Float32Array; // static snow-line jitter (±SNOW_EDGE_AMPLITUDE) in temperature units
 }
 
 /** Procedural landscape: one BiomeId per cell, deterministic in `seed`. */
 export function generateTerrain(seed: number): Terrain {
   const elevRaw = new Float32Array(GRID);
   const moistRaw = new Float32Array(GRID);
+  const snowBias = new Float32Array(GRID);
 
   for (let y = 0; y < H; y++) {
     const ny = y / (H - 1);
@@ -86,6 +94,16 @@ export function generateTerrain(seed: number): Terrain {
 
       elevRaw[i] = e;
       moistRaw[i] = fbm2(nx * FREQ * 2 + 300.5, ny * FREQ * 2 + 120.5, 4, seed ^ 0x1f3a);
+      snowBias[i] =
+        (fbm2(
+          nx * FREQ * SNOW_EDGE_FREQ + 501.7,
+          ny * FREQ * SNOW_EDGE_FREQ + 233.1,
+          3,
+          seed ^ 0x7a2b,
+        ) -
+          0.5) *
+        2 *
+        SNOW_EDGE_AMPLITUDE;
     }
   }
 
@@ -102,8 +120,8 @@ export function generateTerrain(seed: number): Terrain {
       const elev = elevRaw[i];
       const temp = lat - Math.max(0, elev - 0.5) * TEMP_ALT_PENALTY;
       tempBase[i] = temp;
-      biome[i] = classify(elev, moistRaw[i], temp);
+      biome[i] = classify(elev, moistRaw[i], temp, snowBias[i]);
     }
   }
-  return { biome, elev: elevRaw, moist: moistRaw, tempBase };
+  return { biome, elev: elevRaw, moist: moistRaw, tempBase, snowBias };
 }

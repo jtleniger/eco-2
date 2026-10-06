@@ -7,25 +7,25 @@ export function hexToRgb(hex: string): [number, number, number] {
 
 export const BIOMES = [
   // index === biome id; DO NOT reorder
-  { name: 'Deep Water', hex: '#0a2540' }, // 0
-  { name: 'Water', hex: '#1d6fa5' }, // 1
-  { name: 'Beach', hex: '#ddcc94' }, // 2
-  { name: 'Desert', hex: '#e3c268' }, // 3
-  { name: 'Fields', hex: '#8cc152' }, // 4
-  { name: 'Forest', hex: '#34703a' }, // 5
-  { name: 'Swamp', hex: '#4e6b4a' }, // 6
-  { name: 'Mountain', hex: '#8d8d88' }, // 7
-  { name: 'Snow', hex: '#f0f4f8' }, // 8
+  { name: 'Deep Water', hex: '#0a2038' }, // 0
+  { name: 'Water', hex: '#1b638f' }, // 1
+  { name: 'Beach', hex: '#c9bb87' }, // 2
+  { name: 'Desert', hex: '#cdaa5e' }, // 3
+  { name: 'Fields', hex: '#7aa845' }, // 4
+  { name: 'Forest', hex: '#2f6235' }, // 5
+  { name: 'Swamp', hex: '#475c43' }, // 6
+  { name: 'Mountain', hex: '#7d7d78' }, // 7
+  { name: 'Snow', hex: '#c1cbd8' }, // 8
 ] as const;
 
 export const FOODS = [
   // index === food id; DO NOT reorder
-  { name: 'Algae', hex: '#2fbf71', biomes: [1], density: 0.06, maxCoverage: 0.14 },
-  { name: 'Cactus Fruit', hex: '#e0632c', biomes: [3], density: 0.015, maxCoverage: 0.04 },
-  { name: 'Grain', hex: '#f2d35e', biomes: [4], density: 0.07, maxCoverage: 0.16 },
-  { name: 'Berries', hex: '#b5457f', biomes: [5], density: 0.05, maxCoverage: 0.12 },
-  { name: 'Mushroom', hex: '#b06f3a', biomes: [6], density: 0.05, maxCoverage: 0.12 },
-  { name: 'Lichen', hex: '#a8e0d0', biomes: [7, 8], density: 0.025, maxCoverage: 0.07 },
+  { name: 'Algae', hex: '#2caa64', biomes: [1], density: 0.06, maxCoverage: 0.14 },
+  { name: 'Cactus Fruit', hex: '#cc5f2d', biomes: [3], density: 0.015, maxCoverage: 0.04 },
+  { name: 'Grain', hex: '#ddc15f', biomes: [4], density: 0.07, maxCoverage: 0.16 },
+  { name: 'Berries', hex: '#ab4576', biomes: [5], density: 0.05, maxCoverage: 0.12 },
+  { name: 'Mushroom', hex: '#a06a3b', biomes: [6], density: 0.05, maxCoverage: 0.12 },
+  { name: 'Lichen', hex: '#9fd0c2', biomes: [7, 8], density: 0.025, maxCoverage: 0.07 },
 ] as const;
 
 export const BIOME_COUNT = BIOMES.length;

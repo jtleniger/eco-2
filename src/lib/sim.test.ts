@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GRID, MAX_CREATURES, REGEN_SAMPLES_PER_TICK, SEASON_AMPLITUDE, SEASON_PERIOD_TICKS, W } from './config.ts';
+import { GRID, H, MAX_CREATURES, REGEN_SAMPLES_PER_TICK, SEASON_AMPLITUDE, SEASON_PERIOD_TICKS, W } from './config.ts';
 import { seasonName, seasonOffset } from './climate.ts';
 import { Population, spawnInitialCreatures } from './creatures.ts';
 import { computeEligibleCells, regrowTick } from './food.ts';
@@ -15,7 +15,7 @@ import {
   SPECIES_LUT,
   SPECIES_PASSABLE,
 } from './species.ts';
-import { generateTerrain } from './terrain.ts';
+import { classify, generateTerrain } from './terrain.ts';
 import { World } from './world.ts';
 
 /** Every live slot is well formed and the occupant grid agrees with the slots. */
@@ -248,6 +248,25 @@ test('biome bands advance and retreat with the season', () => {
   assert.ok(changed > 0, `summer reclassifies cells, got ${changed}`);
   assert.deepEqual(Array.from(world.eligible), Array.from(computeEligibleCells(world.biome)));
   assertFoodCountsMatch(world.food, world.counts);
+});
+
+test('the snow line is jittered, not a straight isotherm', () => {
+  // On a flat, evenly moist plain the snow edge would otherwise be a latitude line: the
+  // only thing that can move it column to column is the static per-cell snow jitter.
+  const { snowBias } = generateTerrain(12345);
+  const edge: number[] = [];
+  for (let x = 0; x < W; x++) {
+    let y = 0;
+    while (y < H / 2) {
+      const lat = 1 - Math.abs((y / (H - 1)) * 2 - 1);
+      if (classify(0.6, 0.6, lat, snowBias[y * W + x]) !== Biome.Snow) break;
+      y++;
+    }
+    edge.push(y);
+  }
+  const mean = edge.reduce((s, v) => s + v, 0) / edge.length;
+  const sd = Math.sqrt(edge.reduce((s, v) => s + (v - mean) ** 2, 0) / edge.length);
+  assert.ok(sd > 2, `snow edge is ragged, got row sd ${sd.toFixed(2)}`);
 });
 
 test('a creature outside its comfort band moves toward a better temperature', () => {

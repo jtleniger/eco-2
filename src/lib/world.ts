@@ -15,6 +15,7 @@ export class World {
   elev: Float32Array = new Float32Array(GRID);
   moist: Float32Array = new Float32Array(GRID);
   tempBase: Float32Array = new Float32Array(GRID);
+  snowBias: Float32Array = new Float32Array(GRID);
   food: Uint8Array = new Uint8Array(GRID).fill(NONE);
   counts: Uint32Array = new Uint32Array(FOOD_COUNT);
   eligible: Uint32Array = new Uint32Array(FOOD_COUNT);
@@ -33,6 +34,7 @@ export class World {
     this.elev = terrain.elev;
     this.moist = terrain.moist;
     this.tempBase = terrain.tempBase;
+    this.snowBias = terrain.snowBias;
     this.seasonOffset = 0;
     let sum = 0;
     for (let i = 0; i < GRID; i++) sum += this.tempBase[i];
@@ -73,9 +75,9 @@ export class World {
    * changes because temperature only separates biomes that share a species' habitat.
    */
   private applyClimate(): void {
-    const { elev, moist, tempBase, biome, food, counts } = this;
+    const { elev, moist, tempBase, snowBias, biome, food, counts } = this;
     for (let i = 0; i < GRID; i++) {
-      const nb = classify(elev[i], moist[i], tempBase[i] + this.seasonOffset);
+      const nb = classify(elev[i], moist[i], tempBase[i] + this.seasonOffset, snowBias[i]);
       if (nb === biome[i]) continue;
       biome[i] = nb;
       const f = food[i];

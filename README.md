@@ -7,7 +7,7 @@ capacity, and four creature species that live off it.
 
 | Species | Colour | Diet | Habitat |
 | --- | --- | --- | --- |
-| Grazer | `#f6ff00` | land plants | land |
+| Grazer | `#ffff00` | land plants | land |
 | Minnow | `#00f0ff` | Algae | water |
 | Hunter | `#ff1a1a` | Grazers | land |
 | Pike | `#ff00ff` | Minnows | water |
@@ -21,7 +21,9 @@ live counts.
 The climate is seasonal: a sinusoid of amplitude `±0.12` with a ~6-minute period
 at `1x` (`SEASON_PERIOD_TICKS = 3600`) shifts every cell's temperature, and every
 30 ticks the snow/desert/forest/swamp bands are reclassified — the map's colours
-advance and retreat through Spring/Summer/Autumn/Winter. Each species has a
+advance and retreat through Spring/Summer/Autumn/Winter. The snow line carries a
+static per-cell jitter (`SNOW_EDGE_AMPLITUDE`), so it melts back as a ragged,
+terrain-like edge instead of a smooth isotherm. Each species has a
 survival band it dies outside of and a narrower comfort band it walks toward when
 it drifts out of it. The toolbar shows the current season; the menu's World
 section shows the mean temperature and the current offset.
