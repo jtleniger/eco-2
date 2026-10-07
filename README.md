@@ -81,8 +81,35 @@ npm install
 npm run dev      # http://localhost:5173
 npm run check    # svelte-check + tsc
 npm test         # headless simulation tests (node --test, no browser)
+npm run sim      # headless long-run verification (see below)
 npm run build    # dist/
 ```
+
+## Verification
+
+A claim about a long run ("trophic diversity persists") is checked headless, for many seeds at
+once, without watching the browser at 10 ticks/second and without a throwaway script:
+
+```bash
+npm run sim -- --ticks 9000 --seeds 1,7,99,12345 --check trophic
+```
+
+Each seed runs in its own worker thread; the CLI samples the standard metric set every
+`--every` ticks, evaluates the assertions and exits `0` on PASS, `1` on FAIL, `2` on a usage
+error. `--help` prints every flag, the preset sets and the metric keys, which come from a real
+`sampleWorld` sample and so cannot drift from the code. `--progress` streams per-sample lines
+on stderr; `--json` puts the whole report on stdout (use `npm run --silent sim -- …` when
+piping it into a parser, since `npm` writes its own banner to stdout).
+
+An assertion is `<agg>(<metric>[,ticks>=<n>][,ticks<=<n>]) <cmp> <number>` — for example
+`all(population)>=1`, `mean(meanCarnivory,ticks>=2000)>0.15`, `last(speciesTotal)>4`. The
+`ticks` clauses restrict the window that is aggregated, and a window selecting no sample
+fails rather than passing vacuously. `all`, `any`, `min`, `max`, `mean`, `last` and `first`
+aggregate as named. Only a failure that can no longer be repaired stops a run early — `all`
+under any comparison, and `min` under a lower bound — so a PASS always spends the full tick
+budget and a truncated series is always a failing one. Presets: `survival`, `trophic`
+(`trophicClasses` back to 3 after `TROPHIC_WARMUP_TICKS`, because the omnivore band can only
+appear by mutation) and `speciation`.
 
 ## Controls
 
@@ -108,6 +135,9 @@ backing store; the canvas is integer-upscaled with `image-rendering: pixelated`.
 | `src/lib/palette.ts` | biome/food ids, colors, densities, biome eligibility — single source of truth for cell values |
 | `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `climate.ts`, `food.ts`, `genetics.ts`, `names.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, the season clock, food regrowth, the genome operators, the seeded name generator, the founder/species registry and the creature agents |
 | `src/lib/world.ts` | all simulated state + one tick; no canvas, DOM or UI coupling |
+| `src/lib/simrun.ts` | headless long-run harness: the metric sampling, the assertion grammar, `runSeed` (the only run loop) and the presets |
+| `src/lib/simrun.test.ts` | tests for the harness itself: parsing, aggregation, fail-fast, metric soundness, sampling that does not perturb a run |
+| `scripts/sim.ts`, `scripts/sim-worker.ts` | `npm run sim` CLI and its one-seed-per-thread worker entry |
 | `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, the unified edibility rule, size/carnivory tradeoffs, seeded species names, determinism, caps, speciation and extinction, a 5000-tick ecosystem survival run |
 | `src/lib/renderer.ts` | Canvas 2D `ImageData` blitter, one pixel per cell (creature over food over biome) |
 | `src/lib/engine.ts` | canvas, clock and UI mirror driving `World` (accumulator, spiral guard) |

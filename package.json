@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
-    "test": "node --test 'src/**/*.test.ts'"
+    "test": "node --test 'src/**/*.test.ts'",
+    "sim": "node scripts/sim.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
