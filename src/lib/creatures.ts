@@ -2,6 +2,9 @@ import {
   BEACH_CROSS_SIZE,
   CARNIVORE_MIN,
   DEEP_WATER_CROSS_SIZE,
+  FOUNDER_CLUSTER_R,
+  FOUNDER_GROUP,
+  FOUNDER_MIN_FOOD_DENSITY,
   GRID,
   H,
   HERBIVORE_MAX,
@@ -10,14 +13,16 @@ import {
   MAX_CREATURES,
   MAX_SPECIES,
   METABOLIC_EXP,
+  METABOLISM_REPRO_REF,
   MIN_HABITAT_AREA,
-  PREY_CALORIE_MULT,
   PREY_SIZE_RATIO,
+  RARE_MATING_RADIUS,
+  RARE_SPECIES_COUNT,
   SHALLOW_WATER_CROSS_SIZE,
   SPECIATION_DISTANCE,
   W,
 } from './config.ts';
-import { Biome, LAND_MASK, NONE } from './palette.ts';
+import { BIOME_COUNT, Biome, FOODS, FOODS_BY_BIOME, LAND_MASK, NONE } from './palette.ts';
 import {
   GENE,
   GENE_COUNT,
@@ -195,8 +200,8 @@ export class Population {
 
   /**
    * Whether slot `i` may enter biome `b` without it being set in its genome mask: a foodless
-   * barrier its body is big enough to cross. A big water creature can swim open Deep Water, a
-   * big land creature can wade shallow Water, and Beach is walkable by anything with the bulk.
+   * barrier its body is big enough to cross. A big water creature can swim open Deep Water and
+   * a big land creature can wade shallow Water or walk the Beach between them.
    * The lineage check keeps swimmers in the water and walkers on land; size is the gate.
    */
   private canCross(i: number, b: number): boolean {
@@ -207,7 +212,9 @@ export class Population {
     if (b === Biome.Water) {
       return (mask & LAND_MASK) !== 0 && this.massOf(i) >= SHALLOW_WATER_CROSS_SIZE;
     }
-    if (b === Biome.Beach) return this.massOf(i) >= BEACH_CROSS_SIZE;
+    if (b === Biome.Beach) {
+      return (mask & LAND_MASK) !== 0 && this.massOf(i) >= BEACH_CROSS_SIZE;
+    }
     return false;
   }
 
@@ -216,12 +223,18 @@ export class Population {
     return ((this.biomeMask[i] >>> b) & 1) === 1 || this.canCross(i, b);
   }
 
-  /** Creatures slot `i` may kill: it hunts, and `j` is significantly smaller. */
+  /** Creatures slot `i` may kill: it hunts, and `j` is small enough for its carnivory. */
   private canEatCreature(i: number, j: number, biome: Uint8Array): boolean {
     if (j < 0 || j === i || this.dead[j]) return false;
     const o = i * GENE_COUNT;
-    if (this.genes[o + GENE.carnivory] < HERBIVORE_MAX) return false;
-    if (this.massOf(i) < this.massOf(j) * PREY_SIZE_RATIO) return false;
+    const carnivory = this.genes[o + GENE.carnivory];
+    if (carnivory < HERBIVORE_MAX) return false;
+    // A dedicated carnivore can tackle prey near its own size; a marginal hunter needs a big
+    // edge. Rewards carnivory, and stops prey becoming invulnerable by maxing body size —
+    // with a flat ratio an arms race pushed herbivores to the size ceiling, where nothing
+    // could eat them and every seed ended herbivore-only.
+    const ratio = 1 + (PREY_SIZE_RATIO - 1) * (1 - carnivory);
+    if (this.massOf(i) < this.massOf(j) * ratio) return false;
     return this.canEnter(i, biome[this.pos[j]]);
   }
 
@@ -232,36 +245,62 @@ export class Population {
     return this.genes[i * GENE_COUNT + GENE.carnivory] < CARNIVORE_MIN;
   }
 
-  /** True when the cell holds something slot `i` can eat (plant or smaller creature). */
-  private edibleAt(i: number, cell: number, biome: Uint8Array, food: Uint8Array): boolean {
-    return this.canEatPlant(i, food[cell]) || this.canEatCreature(i, this.occupant[cell], biome);
+  /**
+   * Energy slot `i` must bank before it will reproduce. A high metabolic rate burns energy but
+   * brings reproduction forward; a low rate is cheap to keep but must bank more first. Clamped
+   * to `maxEnergy`, so the slowest metabolism is never sterile, only slow. Without this,
+   * metabolism appeared only in upkeep, selection drove it to its floor and upkeep vanished,
+   * so no amount of food could bound the population.
+   */
+  private reproNeed(i: number): number {
+    const o = i * GENE_COUNT;
+    const need = this.genes[o + GENE.reproEnergy] * MATING_ENERGY_FRACTION
+      * (METABOLISM_REPRO_REF / this.genes[o + GENE.metabolism]);
+    return Math.min(need, this.genes[o + GENE.maxEnergy]);
   }
 
-  /** Nearest visible plant or edible creature cell, or `-1`. */
+  /**
+   * Nearest visible target, or `-1`. Tracks the nearest plant and the nearest edible creature
+   * separately: a hunter prefers prey it can see (a pure carnivore has no other option), while
+   * a herbivore takes the plant. An omnivore takes the nearer prey only when it is not far past
+   * the plant it is standing among — otherwise it grazes. A single nearest-edible scan made
+   * omnivores chase whatever was closest, and since crop cover is a hundredfold denser than
+   * prey they almost always chased a plant, so their carnivory was paid for but never used.
+   */
   private findTarget(i: number, biome: Uint8Array, food: Uint8Array): number {
     const o = i * GENE_COUNT;
     const vision = this.genes[o + GENE.vision];
+    const hunter = this.genes[o + GENE.carnivory] >= HERBIVORE_MAX;
     const cx = this.pos[i] % W;
     const cy = (this.pos[i] / W) | 0;
-    let best = -1;
-    let bestD = vision * vision + 1;
+    const r2 = vision * vision;
+    let plant = -1;
+    let plantD = r2 + 1;
+    let prey = -1;
+    let preyD = r2 + 1;
 
     for (let dy = -vision; dy <= vision; dy++) {
       const y = cy + dy;
       if (y < 0 || y >= H) continue;
       for (let dx = -vision; dx <= vision; dx++) {
         const d2 = dx * dx + dy * dy;
-        if (d2 > vision * vision || d2 >= bestD) continue;
+        if (d2 > r2) continue;
         const x = cx + dx;
         if (x < 0 || x >= W) continue;
         const cell = y * W + x;
-        if (this.edibleAt(i, cell, biome, food)) {
-          best = cell;
-          bestD = d2;
+        if (d2 < preyD && this.canEatCreature(i, this.occupant[cell], biome)) {
+          prey = cell;
+          preyD = d2;
+        }
+        if (d2 < plantD && this.canEatPlant(i, food[cell])) {
+          plant = cell;
+          plantD = d2;
         }
       }
     }
-    return best;
+    // Prey within twice the plant's distance is worth the detour; farther, and grazing wins.
+    if (hunter && prey >= 0 && preyD <= plantD * 4) return prey;
+    return plant >= 0 ? plant : prey;
   }
 
   /**
@@ -339,53 +378,62 @@ export class Population {
 
   /**
    * Consume the food at slot `i`'s cell, or a creature sharing it: the cell's occupant, or
-   * `displaced` — the creature whose occupant entry this tick's move overwrote. A plant meal
-   * is credited at `(1 - carnivory)` yield; a kill's calories scale with the prey's mass.
-   * Either meal is scaled by `size^METABOLIC_EXP`, the same power as upkeep: a bigger body eats
-   * a bigger mouthful, so size is not a pure tax and large lineages can persist and grow.
+   * `displaced` — the creature whose occupant entry this tick's move overwrote. A plant meal is
+   * a small fixed yield, `eatGain * (1 - carnivory)`; it does not grow with the eater, so a
+   * plant is worth the same to a mouse and an elephant. A kill transfers the prey's stored
+   * energy scaled by `carnivory` (how much of the carcass the hunter can use), so the two diets
+   * are a genuine trade-off: a pure herbivore grazes at full yield and cannot hunt, a pure
+   * carnivore hunts at full yield and cannot graze, an omnivore splits both. Without the
+   * `carnivory` factor hunting paid no better at 1.0 than at the 0.34 kill threshold while
+   * grazing still fell with every step toward carnivory, so the trait had no interior optimum
+   * and could only decay. A kill is capped by the prey's own energy — predation moves energy,
+   * it does not mint it — so the crop is the ecosystem's only influx and the population is
+   * bounded by primary production. Upkeep still scales with `size^METABOLIC_EXP`, so body size
+   * is a real cost, met by eating more or bigger prey, not by a bigger mouthful of grass.
    */
   private eat(i: number, biome: Uint8Array, food: Uint8Array, foodCounts: Uint32Array, displaced: number): void {
     const o = i * GENE_COUNT;
     const cell = this.pos[i];
     const carnivory = this.genes[o + GENE.carnivory];
     const maxEnergy = this.genes[o + GENE.maxEnergy];
-    const bodyScale = Math.pow(this.massOf(i), METABOLIC_EXP);
     const e = food[cell];
     if (this.canEatPlant(i, e)) {
       foodCounts[e]--;
       food[cell] = NONE;
       // Grazing yield falls off as the diet shifts toward carnivory.
-      this.energy[i] = Math.min(maxEnergy, this.energy[i] + this.genes[o + GENE.eatGain] * (1 - carnivory) * bodyScale);
+      this.energy[i] = Math.min(maxEnergy, this.energy[i] + this.genes[o + GENE.eatGain] * (1 - carnivory));
     }
     let j = this.occupant[cell];
     if (j < 0 || j === i) j = displaced;
     if (this.canEatCreature(i, j, biome)) {
+      const preyEnergy = this.energy[j];
       this.dead[j] = 1; // swept later; never remove another slot mid-loop
-      // Calories come from the prey's mass, so a bigger kill feeds more.
-      const gain = this.genes[o + GENE.eatGain] * PREY_CALORIE_MULT * (this.massOf(j) / this.massOf(i)) * bodyScale;
-      this.energy[i] = Math.min(maxEnergy, this.energy[i] + gain);
+      this.energy[i] = Math.min(maxEnergy, this.energy[i] + preyEnergy * carnivory);
     }
   }
 
   /**
-   * Chebyshev window of radius `MATING_RADIUS` around slot `i`, scanning `dy` then `dx`
-   * ascending: the first compatible, willing neighbour, or `-1`. Deterministic, no `rng`.
+   * Chebyshev window around slot `i`, scanning `dy` then `dx` ascending: the first compatible,
+   * willing neighbour, or `-1`. Deterministic, no `rng`. The window is `MATING_RADIUS` unless
+   * the species is rare (`<= RARE_SPECIES_COUNT` live), when it widens to `RARE_MATING_RADIUS`
+   * so a post-crash remnant can still pair up instead of dying out as singletons.
    */
   private findMate(i: number, registry: SpeciesRegistry): number {
     const here = this.pos[i];
     const cx = here % W;
     const cy = (here / W) | 0;
     const oi = i * GENE_COUNT;
-    for (let dy = -MATING_RADIUS; dy <= MATING_RADIUS; dy++) {
+    const radius = this.speciesCounts[this.species[i]] <= RARE_SPECIES_COUNT ? RARE_MATING_RADIUS : MATING_RADIUS;
+    for (let dy = -radius; dy <= radius; dy++) {
       const y = cy + dy;
       if (y < 0 || y >= H) continue;
-      for (let dx = -MATING_RADIUS; dx <= MATING_RADIUS; dx++) {
+      for (let dx = -radius; dx <= radius; dx++) {
         const x = cx + dx;
         if (x < 0 || x >= W) continue;
         const j = this.occupant[y * W + x];
         if (j < 0 || j === i || this.dead[j] || this.mated[j]) continue;
         const oj = j * GENE_COUNT;
-        if (this.energy[j] < this.genes[oj + GENE.reproEnergy] * MATING_ENERGY_FRACTION) continue;
+        if (this.energy[j] < this.reproNeed(j)) continue;
         const sj = this.species[j];
         if (this.speciesCounts[sj] >= registry.maxPop[sj]) continue;
         const d = geneDistance(
@@ -540,7 +588,7 @@ export class Population {
       this.eat(i, biome, food, foodCounts, displaced);
 
       if (
-        this.energy[i] >= this.genes[o + GENE.reproEnergy] * MATING_ENERGY_FRACTION &&
+        this.energy[i] >= this.reproNeed(i) &&
         !this.mated[i] &&
         this.speciesCounts[s] < registry.maxPop[s] &&
         this.count < this.capacity
@@ -595,14 +643,45 @@ function habitatAreas(
   return area;
 }
 
+/** Per biome, the densest food that can grow there; 0 for Beach and Deep Water. */
+const BIOME_FOOD_DENSITY = (() => {
+  const d = new Float32Array(BIOME_COUNT);
+  for (let b = 0; b < BIOME_COUNT; b++) {
+    for (const f of FOODS_BY_BIOME[b]) if (FOODS[f].density > d[b]) d[b] = FOODS[f].density;
+  }
+  return d;
+})();
+
 /**
- * Place `FOUNDERS[s].initial` individuals of each founder on random unoccupied cells of a
- * habitat at least `MIN_HABITAT_AREA` cells large, each with the founder's reference genome.
+ * A random cluster centre: a cell in a large-enough habitat whose biome feeds at least
+ * `FOUNDER_MIN_FOOD_DENSITY`. Scans from a random offset, so the pick is uniform over the
+ * eligible cells; falls back to the first large-habitat cell when none is productive.
+ */
+function founderCenter(rng: () => number, area: Int32Array, biome: Uint8Array, pop: Population): number {
+  const start = (rng() * GRID) | 0;
+  let fallback = -1;
+  for (let k = 0; k < GRID; k++) {
+    const cell = start + k < GRID ? start + k : start + k - GRID;
+    if (area[cell] < MIN_HABITAT_AREA || pop.occupant[cell] !== -1) continue;
+    if (BIOME_FOOD_DENSITY[biome[cell]] >= FOUNDER_MIN_FOOD_DENSITY) return cell;
+    if (fallback < 0) fallback = cell;
+  }
+  return fallback;
+}
+
+/**
+ * Place `FOUNDERS[s].initial` individuals of each founder on unoccupied cells of a habitat at
+ * least `MIN_HABITAT_AREA` cells large, each with the founder's reference genome. Individuals
+ * are seeded in clusters of up to `FOUNDER_GROUP` within `FOUNDER_CLUSTER_R` cells of a shared
+ * centre, so every member starts within `MATING_RADIUS` of the rest; the next cluster is then
+ * started elsewhere in a large-enough habitat. Spreading a species evenly across the map left a
+ * dozen apex predators with no mate in sight: they sat at full energy, never bred, and died out
+ * even where prey was plentiful, and their lake-scattered counterparts could not meet at all.
+ * A centre is placed only on a biome that feeds at least `FOUNDER_MIN_FOOD_DENSITY`, so no
+ * founder starts on the map's ~47% snow or other barren ground and starves before it breeds.
  * The passable cells of a species are not always one connected habitat — this terrain's water
- * is 23 disconnected lakes, several of them a few dozen cells — and a handful of founders in a
- * micro-pond breed up to their species cap inside it, where no crop can regrow, and starve.
- * Habitats smaller than the threshold are left unpopulated, so no founder starts in a pond
- * too small to feed it.
+ * is 23 disconnected lakes, several of them a few dozen cells — and habitats smaller than the
+ * threshold are left unpopulated, so no founder starts in a pond too small to feed it.
  */
 export function spawnInitialCreatures(
   biome: Uint8Array,
@@ -616,14 +695,33 @@ export function spawnInitialCreatures(
     const spec = FOUNDERS[s];
     habitatAreas(biome, registry.refBiome[s], area, members);
     const src = registry.refOf(s);
-    for (let n = 0; n < spec.initial; n++) {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        const cell = (rng() * GRID) | 0;
-        if (area[cell] < MIN_HABITAT_AREA || pop.occupant[cell] !== -1) continue;
+    let placed = 0;
+    while (placed < spec.initial) {
+      const center = founderCenter(rng, area, biome, pop);
+      if (center < 0) break; // no room left in any large-enough habitat
+      const cx = center % W;
+      const cy = (center / W) | 0;
+      const group = Math.min(FOUNDER_GROUP, spec.initial - placed);
+      for (let k = 0; k < group; k++) {
+        let cell = center;
+        if (k > 0) {
+          cell = -1;
+          for (let attempt = 0; attempt < 24; attempt++) {
+            const x = cx + (((rng() * (2 * FOUNDER_CLUSTER_R + 1)) | 0) - FOUNDER_CLUSTER_R);
+            const y = cy + (((rng() * (2 * FOUNDER_CLUSTER_R + 1)) | 0) - FOUNDER_CLUSTER_R);
+            if (x < 0 || x >= W || y < 0 || y >= H) continue;
+            const c = y * W + x;
+            // Same component: equal component size and passable (0 elsewhere).
+            if (area[c] !== area[center] || pop.occupant[c] !== -1) continue;
+            cell = c;
+            break;
+          }
+          if (cell < 0) continue; // this cluster is full; the outer loop starts another
+        }
         // pool full: stop seeding
         if (pop.spawn(cell, spec.startEnergy, s, registry.colorSlot[s], src, registry) === -1) return;
         registry.habitat[s] |= 1 << biome[cell];
-        break;
+        placed++;
       }
     }
   }

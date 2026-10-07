@@ -20,23 +20,29 @@ may enter, but a mutation can add bits no member ever uses — Deep Water and Be
 host no food — so the menu's habitat line reports the biomes the species'
 members have actually stood on, not the mask. The mask is not the only way in:
 foodless barriers also yield to body size, so a creature can cross them without
-carrying the bit. A water creature whose `size` reaches 1 may swim open Deep
-Water, a land creature of `size` 1 may wade shallow Water, and Beach is walkable
-by anything of `size` 1 — so the larger fish can range between lakes across the
-deep and along the sand while the smallest stay in their own shallows, and a big
-land animal can ford a channel to reach the far bank. Eating is one unified edibility rule:
+carrying the bit, but only along its own lineage: a water creature whose `size`
+reaches 1 may swim open Deep Water, and a land creature of `size` 1 may wade
+shallow Water or walk the Beach between them. A swimmer therefore never gains
+land, nor a walker open water. So the larger fish can range between lakes across
+the deep while the smallest stay in their own shallows, and a big land animal can
+ford a channel to reach the far bank. Eating is one unified edibility rule:
 a creature grazes a plant cell when the plant's bit is set in its `foodMask` and
 its `carnivory` is below `CARNIVORE_MIN`, and it kills a creature it lands on
-when its `carnivory` is at least `HERBIVORE_MAX` and its mass is at least
-`PREY_SIZE_RATIO` (1.3) times the target's — so predators eat creatures that are
-significantly smaller, not a fixed taxonomic class. The trophic class shown in
-the menu is derived from `carnivory` (`< 0.34` Herbivore, `< 0.66` Omnivore,
-else Carnivore), a plant meal is worth `(1 - carnivory)` of its `eatGain` so
-omnivores graze at reduced yield, a kill's calories scale with the prey's mass
-(`PREY_CALORIE_MULT`), and upkeep scales with `size^0.75` (Kleiber-like). A meal
-is credited at that same `size^0.75`, so a bigger body eats a bigger mouthful: the
-larger upkeep is met by larger meals, size is not a pure tax, and fish grow past
-their founding size instead of shrinking to the gene floor. Offspring recombine both parents' genomes and mutate, so
+when its `carnivory` is at least `HERBIVORE_MAX` and its mass clears a
+`carnivory`-scaled multiple of the target's — from `PREY_SIZE_RATIO` (1.3) for a
+marginal hunter down to 1 for a dedicated carnivore — so predators eat creatures
+smaller than themselves, and a specialist can tackle prey near its own size while
+a generalist needs a big edge. The trophic class shown in the menu is derived
+from `carnivory` (`< 0.34` Herbivore, `< 0.66` Omnivore, else Carnivore). A plant
+meal is a small fixed yield, `(1 - carnivory)` of `eatGain`, the same for a mouse
+and an elephant; a kill transfers the prey's stored energy, scaled by
+`carnivory`, so predation moves energy rather than minting it and the crop is the
+ecosystem's only influx. Upkeep scales with `size^0.75` (Kleiber-like), so body
+size is a real cost — met by eating more, or bigger prey, not a bigger mouthful
+of grass. Metabolism is a trade-off rather than a free saving: a high rate burns
+energy but lowers the energy a creature must bank before it breeds, while a low
+rate is cheap to keep but breeds later, so neither extreme sweeps the gene pool
+and upkeep keeps the population bounded by primary production. Offspring recombine both parents' genomes and mutate, so
 traits drift within a lineage. Two creatures can only mate when their genomes are
 close enough, so a newborn that is still within `SPECIATION_DISTANCE` of either
 parent stays in that parent's species however far the species' reference genome

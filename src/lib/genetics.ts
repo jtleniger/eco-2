@@ -39,7 +39,7 @@ export const GENES: readonly GeneSpec[] = [
   { min: 3, max: 12, step: 0.35, integer: true }, // vision
   { min: 1, max: 4, step: 0.12, integer: true }, // speed
   { min: 0, max: 1, step: 0.04, integer: false }, // moveChance
-  { min: 0.02, max: 1.5, step: 0.04, integer: false }, // metabolism
+  { min: 0.3, max: 1.5, step: 0.04, integer: false }, // metabolism
   { min: 60, max: 320, step: 6, integer: false }, // maxEnergy
   { min: 40, max: 260, step: 6, integer: false }, // reproEnergy
   { min: 1500, max: 12000, step: 150, integer: true }, // maxAge
