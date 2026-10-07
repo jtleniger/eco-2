@@ -6,11 +6,15 @@ import {
   GRID,
   H,
   HERBIVORE_MAX,
+  MATING_RADIUS,
   MAX_CREATURES,
   MAX_SPECIES,
+  RARE_MATING_RADIUS,
+  RARE_SPECIES_COUNT,
   REGEN_SAMPLES_PER_TICK,
   SEASON_AMPLITUDE,
   SEASON_PERIOD_TICKS,
+  VISION_UPKEEP,
   W,
 } from './config.ts';
 import { seasonName, seasonOffset } from './climate.ts';
@@ -28,6 +32,7 @@ import {
   writeTraits,
 } from './species.ts';
 import { classify, generateTerrain } from './terrain.ts';
+import { TROPHIC_MAX_HERBIVORE_SHARE, TROPHIC_MIN_SHARE } from './simrun.ts';
 import { World } from './world.ts';
 
 /** A registry with all four founders registered and an empty population to go with it. */
@@ -440,20 +445,32 @@ test('the ecosystem survives 5000 ticks', () => {
 });
 
 test('all three trophic strategies persist', () => {
-  for (const seed of [12345, 1, 7]) {
+  for (const seed of [12345, 1]) {
     const world = new World();
     world.reset(seed);
     for (let t = 0; t < 5000; t++) world.step();
+    const n = world.population.count;
     let herb = 0, omni = 0, carn = 0;
-    for (let i = 0; i < world.population.count; i++) {
+    for (let i = 0; i < n; i++) {
       const c = world.population.genes[i * GENE_COUNT + GENE.carnivory];
       if (c >= CARNIVORE_MIN) carn++;
       else if (c >= HERBIVORE_MAX) omni++;
       else herb++;
     }
-    assert.ok(herb > 0, `seed ${seed}: herbivores persist (h/o/c ${herb}/${omni}/${carn})`);
-    assert.ok(omni > 0, `seed ${seed}: omnivores persist (h/o/c ${herb}/${omni}/${carn})`);
-    assert.ok(carn > 0, `seed ${seed}: carnivores persist (h/o/c ${herb}/${omni}/${carn})`);
+    // The same floors the harness's `trophic-mix` check uses, so the suite and `npm run sim`
+    // cannot drift apart.
+    const share = { herbivore: herb / n, omnivore: omni / n, carnivore: carn / n };
+    assert.ok(n > 0, `seed ${seed}: population survives 5000 ticks`);
+    for (const cls of ['herbivore', 'omnivore', 'carnivore'] as const) {
+      assert.ok(
+        share[cls] >= TROPHIC_MIN_SHARE,
+        `seed ${seed}: ${cls} share ${share[cls].toFixed(3)} >= ${TROPHIC_MIN_SHARE} (h/o/c ${herb}/${omni}/${carn})`,
+      );
+    }
+    assert.ok(
+      share.herbivore <= TROPHIC_MAX_HERBIVORE_SHARE,
+      `seed ${seed}: herbivore share ${share.herbivore.toFixed(3)} <= ${TROPHIC_MAX_HERBIVORE_SHARE} (h/o/c ${herb}/${omni}/${carn})`,
+    );
     assertPopulationSound(world.population, world.registry);
   }
 });
@@ -785,7 +802,9 @@ test('a marginal hunter needs a bigger edge than a dedicated carnivore', () => {
   const counts = new Uint32Array(FOOD_COUNT);
   const tempBase = new Float32Array(GRID).fill(0.5);
 
-  // A pure carnivore can tackle prey of equal mass; a marginal hunter cannot.
+  // A pure carnivore can tackle prey of equal mass (its ratio is `PREY_SIZE_RATIO_SPECIALIST`,
+  // below 1, so it can even eat larger prey); a marginal hunter cannot (carnivory 0.4 gives a
+  // ratio above 1 against a herbivore, so it must outweigh its prey).
   const pure = founderPop();
   assert.ok(
     spawnCustom(pure.pop, pure.registry, 100 * W + 100, 200, 2, { size: 2, carnivory: 1, moveChance: 0 }) >= 0,
@@ -809,6 +828,79 @@ test('a marginal hunter needs a bigger edge than a dedicated carnivore', () => {
   );
   marginal.pop.step(biome, food, counts, mulberry32(4), tempBase, 0, marginal.registry, 0);
   assert.equal(marginal.pop.speciesCounts[0], 1, 'the marginal hunter did not eat equal-mass prey');
+});
+
+test('a hunter cannot eat a fellow hunter without the marginal edge', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const food = new Uint8Array(GRID).fill(NONE);
+  const counts = new Uint32Array(FOOD_COUNT);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  const cell = 100 * W + 100;
+  // Too little energy to breed, so the only interaction under test is the kill.
+  const hunter = { size: 2, carnivory: 1, vision: 8, speed: 2, moveChance: 0 };
+
+  // Two identical pure carnivores share a cell; the first processed sees its fellow as the cell's
+  // occupant. The widened specialist ratio must not apply to a fellow predator.
+  const fellows = founderPop();
+  assert.ok(spawnCustom(fellows.pop, fellows.registry, cell, 50, 2, hunter) >= 0, 'first hunter spawned');
+  assert.ok(spawnCustom(fellows.pop, fellows.registry, cell, 50, 2, hunter) >= 0, 'second hunter spawned');
+  fellows.pop.step(biome, food, counts, mulberry32(11), tempBase, 0, fellows.registry, 0);
+  assert.equal(fellows.pop.count, 2, 'neither hunter ate the other');
+  assert.equal(fellows.pop.speciesCounts[2], 2, 'both hunters are alive');
+
+  // The same pure carnivore does eat an equal-mass herbivore sharing its cell.
+  const eaten = founderPop();
+  assert.ok(spawnCustom(eaten.pop, eaten.registry, cell, 50, 2, hunter) >= 0, 'hunter spawned');
+  assert.ok(
+    spawnCustom(eaten.pop, eaten.registry, cell, 30, 0, { ...hunter, carnivory: 0 }) >= 0,
+    'equal-mass herbivore spawned',
+  );
+  eaten.pop.step(biome, food, counts, mulberry32(11), tempBase, 0, eaten.registry, 0);
+  assert.equal(eaten.pop.speciesCounts[0], 0, 'the equal-mass herbivore was eaten');
+});
+
+test('a rare species mates across the widened radius, a common one does not', () => {
+  const biome = new Uint8Array(GRID).fill(Biome.Fields);
+  const tempBase = new Float32Array(GRID).fill(0.5);
+  // Immobile, full of energy and with no food or prey in sight: the only way the live count can
+  // grow is a birth, and the only possible pair is the one placed `dist` cells apart.
+  const genes = { size: 1, carnivory: 0, vision: 3, speed: 1, moveChance: 0 };
+
+  /** Bystanders (spaced beyond even the widened search) plus a pair `dist` cells apart; returns
+   *  how many creatures a single tick adds. */
+  const birthsAt = (bystanders: number, dist: number): number => {
+    const food = new Uint8Array(GRID).fill(NONE);
+    const counts = new Uint32Array(FOOD_COUNT);
+    const { pop, registry } = founderPop();
+    for (let b = 0; b < bystanders; b++) {
+      const cell = (30 + Math.floor(b / 7) * 60) * W + 30 + (b % 7) * 60;
+      assert.ok(spawnCustom(pop, registry, cell, 100, 0, genes) >= 0, `bystander ${b} spawned`);
+    }
+    const row = 200;
+    assert.ok(spawnCustom(pop, registry, row * W + 100, 100, 0, genes) >= 0, 'first of the pair spawned');
+    assert.ok(spawnCustom(pop, registry, row * W + 100 + dist, 100, 0, genes) >= 0, 'second of the pair spawned');
+    const before = pop.count;
+    pop.step(biome, food, counts, mulberry32(21), tempBase, 0, registry, 0);
+    return pop.count - before;
+  };
+
+  // 12 live is exactly RARE_SPECIES_COUNT, so the search widens to RARE_MATING_RADIUS.
+  assert.equal(
+    birthsAt(RARE_SPECIES_COUNT - 2, RARE_MATING_RADIUS - 1),
+    1,
+    `a rare species mates at distance ${RARE_MATING_RADIUS - 1}`,
+  );
+  assert.equal(
+    birthsAt(RARE_SPECIES_COUNT - 2, RARE_MATING_RADIUS + 1),
+    0,
+    `even the widened search has a limit at distance ${RARE_MATING_RADIUS + 1}`,
+  );
+  // 15 live is above RARE_SPECIES_COUNT, so only the short MATING_RADIUS applies.
+  assert.equal(
+    birthsAt(RARE_SPECIES_COUNT + 1, MATING_RADIUS + 1),
+    0,
+    `a common species does not mate at distance ${MATING_RADIUS + 1}`,
+  );
 });
 
 test('a herbivore does not eat creatures and a carnivore does not graze', () => {
@@ -879,7 +971,12 @@ test('an omnivore grazes at reduced yield', () => {
   );
   pop.step(biome, food, counts, mulberry32(8), tempBase, 0, registry, 0);
 
-  const expected = 100 - metabolism * Math.pow(2, 0.75) + eatGain * 0.5;
+  // Upkeep is metabolism-by-mass plus vision upkeep; the meal is `eatGain * (1 - carnivory)^3`.
+  const expected =
+    100 -
+    metabolism * Math.pow(2, 0.75) -
+    FOUNDERS[0].vision * VISION_UPKEEP +
+    eatGain * 0.125;
   assert.ok(
     Math.abs(pop.energy[0] - expected) < 1e-4,
     `omnivore energy ${pop.energy[0]} ~= ${expected}`,

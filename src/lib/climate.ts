@@ -7,10 +7,11 @@ export type SeasonName = 'Spring' | 'Summer' | 'Autumn' | 'Winter';
  * crosses zero rising at mid-Spring, peaks (+A) at mid-Summer, crosses zero falling at
  * mid-Autumn and troughs (-A) at mid-Winter. So Summer is the warmest quarter and Winter the
  * coldest, i.e. biomes recede through Spring and the first half of Summer, and readvance
- * through Autumn and the first half of Winter.
+ * through Autumn and the first half of Winter. `amplitude` defaults to the global swing; a run
+ * carries its own per-seed amplitude so harsh seeds swing harder (see `SEASON_AMPLITUDE_MIN`).
  */
-export function seasonOffset(tick: number): number {
-  return SEASON_AMPLITUDE * Math.sin((2 * Math.PI * tick) / SEASON_PERIOD_TICKS - Math.PI / 4);
+export function seasonOffset(tick: number, amplitude: number = SEASON_AMPLITUDE): number {
+  return amplitude * Math.sin((2 * Math.PI * tick) / SEASON_PERIOD_TICKS - Math.PI / 4);
 }
 
 /** Calendar season for `tick`, starting at Spring. */

@@ -4,7 +4,7 @@
 // `scripts/sim.ts` (see `npm run sim`).
 import { CARNIVORE_MIN, GRID, HERBIVORE_MAX, MAX_CREATURES, MAX_SPECIES } from './config.ts';
 import { coverage } from './food.ts';
-import { GENE, GENE_COUNT } from './genetics.ts';
+import { GENE, GENE_COUNT, GENES } from './genetics.ts';
 import { BIOMES, FOODS, FOOD_COUNT } from './palette.ts';
 import { World } from './world.ts';
 
@@ -73,16 +73,32 @@ export function sampleWorld(world: World): Sample {
   let herbivore = 0;
   let omnivore = 0;
   let carnivore = 0;
+  let herbivoreEnergy = 0;
+  let omnivoreEnergy = 0;
+  let carnivoreEnergy = 0;
   let sumCarnivory = 0;
   let sumSize = 0;
+  let sumVision = 0;
+  let sizeAtCeiling = 0;
+  const ceilingSize = GENES[GENE.size].max - 0.15;
   for (let i = 0; i < n; i++) {
     const o = i * GENE_COUNT;
     const carnivory = pop.genes[o + GENE.carnivory];
+    const size = pop.genes[o + GENE.size];
     sumCarnivory += carnivory;
-    sumSize += pop.genes[o + GENE.size];
-    if (carnivory < HERBIVORE_MAX) herbivore++;
-    else if (carnivory < CARNIVORE_MIN) omnivore++;
-    else carnivore++;
+    sumSize += size;
+    sumVision += pop.genes[o + GENE.vision];
+    if (size >= ceilingSize) sizeAtCeiling++;
+    if (carnivory < HERBIVORE_MAX) {
+      herbivore++;
+      herbivoreEnergy += pop.energy[i];
+    } else if (carnivory < CARNIVORE_MIN) {
+      omnivore++;
+      omnivoreEnergy += pop.energy[i];
+    } else {
+      carnivore++;
+      carnivoreEnergy += pop.energy[i];
+    }
   }
 
   let counterSum = 0;
@@ -108,13 +124,24 @@ export function sampleWorld(world: World): Sample {
     herbivore,
     omnivore,
     carnivore,
+    herbivoreShare: n === 0 ? 0 : herbivore / n,
+    omnivoreShare: n === 0 ? 0 : omnivore / n,
+    carnivoreShare: n === 0 ? 0 : carnivore / n,
+    herbivoreMeanEnergy: herbivore === 0 ? 0 : herbivoreEnergy / herbivore,
+    omnivoreMeanEnergy: omnivore === 0 ? 0 : omnivoreEnergy / omnivore,
+    carnivoreMeanEnergy: carnivore === 0 ? 0 : carnivoreEnergy / carnivore,
     trophicClasses: (herbivore > 0 ? 1 : 0) + (omnivore > 0 ? 1 : 0) + (carnivore > 0 ? 1 : 0),
     meanCarnivory: n === 0 ? 0 : sumCarnivory / n,
     meanSize: n === 0 ? 0 : sumSize / n,
+    meanVision: n === 0 ? 0 : sumVision / n,
+    sizeAtCeiling: n === 0 ? 0 : sizeAtCeiling / n,
     countersOk: counterSum === n ? 1 : 0,
     foodCoverage: coverageCount === 0 ? 0 : coverageSum / coverageCount,
     seasonOffset: world.seasonOffset,
     meanTemp: world.meanTempBase + world.seasonOffset,
+    // The run's environmental regime, so a sweep result can be read back per seed.
+    huntEfficiency: world.huntEfficiency,
+    seasonAmplitude: world.seasonAmplitude,
   };
   for (let b = 0; b < BIOMES.length; b++) s[`biome.${slug(BIOMES[b].name)}`] = cells[b] / GRID;
   for (let f = 0; f < FOOD_COUNT; f++) s[`food.${slug(FOODS[f].name)}.coverage`] = coverage(counts, eligible, f);
@@ -361,3 +388,142 @@ export const PRESETS: Record<string, readonly string[]> = {
   trophic: [`all(trophicClasses,ticks>=${TROPHIC_WARMUP_TICKS})>=3`],
   speciation: [`last(speciesTotal)>4`],
 };
+
+// The `trophic-mix` check is not a per-seed assertion list: no single seed can express "the
+// favoured class varies across seeds", so the CLI routes `--check trophic-mix` to
+// `trophicMixVerdict` and evaluates it once, over every finished run.
+/** Every class must hold at least this share of a run's final population (Gate G1). */
+export const TROPHIC_MIN_SHARE = 0.05;
+/** A run's final herbivore share must not exceed this (Gate G2: no monoculture). */
+export const TROPHIC_MAX_HERBIVORE_SHARE = 0.70;
+/** The final carnivore share must span at least this across the seed set (Gate G3a). */
+export const TROPHIC_MIN_CARNIVORE_SPREAD = 0.10;
+/** No class may be the run's favoured class on more than this fraction of the seed set (G3b). */
+export const TROPHIC_MAX_FAVOURED_FRACTION = 2 / 3;
+/** Tick the favoured class is measured from: its share at the last sample minus here. */
+export const TROPHIC_FAVOURED_FROM = 1000;
+
+export interface SeedSetVerdict {
+  expr: string;
+  pass: boolean;
+  detail: string;
+}
+
+const TROPHIC_CLASSES = ['herbivore', 'omnivore', 'carnivore'] as const;
+type TrophicClass = (typeof TROPHIC_CLASSES)[number];
+
+/**
+ * Evaluate the cross-seed `trophic-mix` check over finished runs, one verdict per Gate G1-G3(b):
+ * G1 every class holds `TROPHIC_MIN_SHARE` on every seed (its final `herbivoreShare`,
+ * `omnivoreShare`, `carnivoreShare`); G2 no herbivore monoculture (`TROPHIC_MAX_HERBIVORE_SHARE`);
+ * G3(a) the final carnivore share spans `TROPHIC_MIN_CARNIVORE_SPREAD` across seeds; G3(b) no
+ * class gains the most share from tick `TROPHIC_FAVOURED_FROM` to the end (ties broken herbivore,
+ * omnivore, carnivore) on more than `TROPHIC_MAX_FAVOURED_FRACTION` of the seed set. Reads the
+ * last sample of each run; throws on fewer than three runs, since "varies across seeds" is
+ * meaningless over one or two.
+ */
+export function trophicMixVerdict(
+  runs: readonly { seed: number; samples: Sample[] }[],
+): SeedSetVerdict[] {
+  if (runs.length < 3) throw new Error('need >= 3 seeds');
+
+  const lastShares = runs.map((run) => run.samples[run.samples.length - 1]);
+
+  const g1: SeedSetVerdict = {
+    expr: `viable(herbivoreShare,omnivoreShare,carnivoreShare)>=${TROPHIC_MIN_SHARE}`,
+    pass: true,
+    detail: '',
+  };
+  let minShare = Infinity;
+  let minShareSeed = runs[0].seed;
+  let minShareClass: TrophicClass = TROPHIC_CLASSES[0];
+  for (let r = 0; r < runs.length; r++) {
+    for (const cls of TROPHIC_CLASSES) {
+      const share = lastShares[r][`${cls}Share`];
+      if (share < minShare) {
+        minShare = share;
+        minShareSeed = runs[r].seed;
+        minShareClass = cls;
+      }
+    }
+  }
+  g1.pass = minShare >= TROPHIC_MIN_SHARE;
+  g1.detail = `min ${minShareClass}Share ${minShare.toFixed(3)} on seed ${minShareSeed} >= ${TROPHIC_MIN_SHARE}`;
+
+  const g2: SeedSetVerdict = {
+    expr: `max(herbivoreShare)<=${TROPHIC_MAX_HERBIVORE_SHARE}`,
+    pass: true,
+    detail: '',
+  };
+  let maxHerb = -Infinity;
+  let maxHerbSeed = runs[0].seed;
+  for (let r = 0; r < runs.length; r++) {
+    const v = lastShares[r].herbivoreShare;
+    if (v > maxHerb) {
+      maxHerb = v;
+      maxHerbSeed = runs[r].seed;
+    }
+  }
+  g2.pass = maxHerb <= TROPHIC_MAX_HERBIVORE_SHARE;
+  g2.detail = `max herbivoreShare ${maxHerb.toFixed(3)} on seed ${maxHerbSeed} <= ${TROPHIC_MAX_HERBIVORE_SHARE}`;
+
+  const g3a: SeedSetVerdict = {
+    expr: `spread(carnivoreShare)>=${TROPHIC_MIN_CARNIVORE_SPREAD}`,
+    pass: true,
+    detail: '',
+  };
+  let minCarn = Infinity;
+  let maxCarn = -Infinity;
+  let minCarnSeed = runs[0].seed;
+  let maxCarnSeed = runs[0].seed;
+  for (let r = 0; r < runs.length; r++) {
+    const v = lastShares[r].carnivoreShare;
+    if (v < minCarn) {
+      minCarn = v;
+      minCarnSeed = runs[r].seed;
+    }
+    if (v > maxCarn) {
+      maxCarn = v;
+      maxCarnSeed = runs[r].seed;
+    }
+  }
+  const spread = maxCarn - minCarn;
+  g3a.pass = spread >= TROPHIC_MIN_CARNIVORE_SPREAD;
+  g3a.detail =
+    `spread ${spread.toFixed(3)} (seed ${minCarnSeed} ${minCarn.toFixed(3)} .. ` +
+    `seed ${maxCarnSeed} ${maxCarn.toFixed(3)}) >= ${TROPHIC_MIN_CARNIVORE_SPREAD}`;
+
+  const g3b: SeedSetVerdict = { expr: 'favouredClass is not constant', pass: true, detail: '' };
+  const favoured: Record<TrophicClass, number> = { herbivore: 0, omnivore: 0, carnivore: 0 };
+  for (const run of runs) {
+    const last = run.samples[run.samples.length - 1];
+    // The earliest sample at or after `TROPHIC_FAVOURED_FROM`; a run shorter than that falls
+    // back to its first sample, where every gain is then measured from tick 0.
+    let from = run.samples[0];
+    for (const s of run.samples) {
+      if (s.tick >= TROPHIC_FAVOURED_FROM) {
+        from = s;
+        break;
+      }
+    }
+    let best: TrophicClass = TROPHIC_CLASSES[0];
+    let bestGain = -Infinity;
+    for (const cls of TROPHIC_CLASSES) {
+      const gain = last[`${cls}Share`] - from[`${cls}Share`];
+      if (gain > bestGain + 1e-12) {
+        bestGain = gain;
+        best = cls;
+      }
+    }
+    favoured[best]++;
+  }
+  let top: TrophicClass = TROPHIC_CLASSES[0];
+  for (const cls of TROPHIC_CLASSES) if (favoured[cls] > favoured[top]) top = cls;
+  const allowed = TROPHIC_MAX_FAVOURED_FRACTION * runs.length;
+  g3b.pass = favoured[top] <= allowed;
+  g3b.detail =
+    `favoured ${top} on ${favoured[top]}/${runs.length} seeds (max ${allowed}); ` +
+    TROPHIC_CLASSES.map((c) => `${c} ${favoured[c]}`).join(', ');
+
+  return [g1, g2, g3a, g3b];
+}

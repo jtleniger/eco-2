@@ -3,12 +3,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   PRESETS,
+  TROPHIC_FAVOURED_FROM,
+  TROPHIC_MAX_FAVOURED_FRACTION,
+  TROPHIC_MAX_HERBIVORE_SHARE,
+  TROPHIC_MIN_CARNIVORE_SPREAD,
+  TROPHIC_MIN_SHARE,
   TROPHIC_WARMUP_TICKS,
   decisiveFail,
   evaluateAssertion,
   parseAssertion,
   runSeed,
   sampleWorld,
+  trophicMixVerdict,
   type Agg,
   type Cmp,
   type Sample,
@@ -163,4 +169,92 @@ test('runSeed stops at the first sample that can no longer pass', () => {
 
   assert.equal(PRESETS.trophic.length, 1);
   assert.ok(PRESETS.trophic[0].includes(String(TROPHIC_WARMUP_TICKS)));
+});
+
+/** `[herbivore, omnivore, carnivore]` shares. */
+type Shares = readonly [number, number, number];
+
+/**
+ * A synthetic run whose class shares at tick 0 and `TROPHIC_FAVOURED_FROM` are `from`, and at
+ * tick 6000 are `to`, so the favoured class is the one with the largest `to - from` gain.
+ */
+function shareRun(
+  seed: number,
+  from: Shares,
+  to: Shares,
+): { seed: number; samples: Sample[] } {
+  const sample = (tick: number, s: Shares): Sample => ({
+    tick,
+    herbivoreShare: s[0],
+    omnivoreShare: s[1],
+    carnivoreShare: s[2],
+  });
+  return { seed, samples: [sample(0, from), sample(TROPHIC_FAVOURED_FROM, from), sample(6000, to)] };
+}
+
+test('trophicMixVerdict names each gate and passes only when all four hold', () => {
+  const balanced: Shares = [0.6, 0.2, 0.2];
+  const verdicts = trophicMixVerdict([
+    shareRun(1, balanced, [0.55, 0.25, 0.2]), // favoured: omnivore
+    shareRun(2, balanced, [0.45, 0.25, 0.3]), // favoured: carnivore
+    shareRun(3, balanced, [0.62, 0.19, 0.19]), // favoured: herbivore
+  ]);
+  assert.deepEqual(
+    verdicts.map((v) => v.expr),
+    [
+      `viable(herbivoreShare,omnivoreShare,carnivoreShare)>=${TROPHIC_MIN_SHARE}`,
+      `max(herbivoreShare)<=${TROPHIC_MAX_HERBIVORE_SHARE}`,
+      `spread(carnivoreShare)>=${TROPHIC_MIN_CARNIVORE_SPREAD}`,
+      'favouredClass is not constant',
+    ],
+  );
+  assert.ok(verdicts.every((v) => v.pass), JSON.stringify(verdicts));
+  // The detail names the failing/worst edge of the check.
+  assert.match(verdicts[0].detail, /seed 3/);
+
+  assert.throws(() => trophicMixVerdict([shareRun(1, balanced, balanced)]), /need >= 3 seeds/);
+});
+
+test('trophicMixVerdict fails G1 when a class dips below the viability floor', () => {
+  const balanced: Shares = [0.6, 0.2, 0.2];
+  const [g1] = trophicMixVerdict([
+    shareRun(1, balanced, [0.55, 0.25, 0.2]),
+    shareRun(2, balanced, [0.45, 0.25, 0.3]),
+    shareRun(3, balanced, [0.62, 0.33, 0.05 - 0.005]), // carnivore share 0.045
+  ]);
+  assert.equal(g1.pass, false);
+  assert.match(g1.detail, /carnivoreShare 0\.045 on seed 3/);
+});
+
+test('trophicMixVerdict fails G2 on a herbivore monoculture', () => {
+  const balanced: Shares = [0.6, 0.2, 0.2];
+  const [, g2] = trophicMixVerdict([
+    shareRun(1, balanced, [0.55, 0.25, 0.2]),
+    shareRun(2, balanced, [0.45, 0.25, 0.3]),
+    shareRun(3, balanced, [TROPHIC_MAX_HERBIVORE_SHARE + 0.1, 0.05, 0.05]),
+  ]);
+  assert.equal(g2.pass, false);
+  assert.match(g2.detail, /max herbivoreShare 0\.800 on seed 3/);
+});
+
+test('trophicMixVerdict fails G3(a) when the carnivore share barely varies', () => {
+  const balanced: Shares = [0.6, 0.2, 0.2];
+  const [, , g3a] = trophicMixVerdict([
+    shareRun(1, balanced, [0.58, 0.22, 0.2]),
+    shareRun(2, balanced, [0.56, 0.22, 0.22]),
+    shareRun(3, balanced, [0.52, 0.24, 0.25]), // spread 0.05
+  ]);
+  assert.equal(g3a.pass, false);
+  assert.match(g3a.detail, /spread 0\.050/);
+});
+
+test('trophicMixVerdict fails G3(b) when one class is favoured on every seed', () => {
+  const balanced: Shares = [0.6, 0.2, 0.2];
+  const [, , , g3b] = trophicMixVerdict([
+    shareRun(1, balanced, [0.6, 0.3, 0.1]), // favoured: omnivore
+    shareRun(2, balanced, [0.55, 0.3, 0.15]), // favoured: omnivore
+    shareRun(3, balanced, [0.5, 0.3, 0.2]), // favoured: omnivore
+  ]);
+  assert.equal(g3b.pass, false);
+  assert.match(g3b.detail, new RegExp(`favoured omnivore on 3/3 seeds \\(max ${TROPHIC_MAX_FAVOURED_FRACTION * 3}\\)`));
 });

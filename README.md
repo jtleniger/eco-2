@@ -28,18 +28,25 @@ the deep while the smallest stay in their own shallows, and a big land animal ca
 ford a channel to reach the far bank. Eating is one unified edibility rule:
 a creature grazes a plant cell when the plant's bit is set in its `foodMask` and
 its `carnivory` is below `CARNIVORE_MIN`, and it kills a creature it lands on
-when its `carnivory` is at least `HERBIVORE_MAX` and its mass clears a
-`carnivory`-scaled multiple of the target's — from `PREY_SIZE_RATIO` (1.3) for a
-marginal hunter down to 1 for a dedicated carnivore — so predators eat creatures
-smaller than themselves, and a specialist can tackle prey near its own size while
-a generalist needs a big edge. The trophic class shown in the menu is derived
+when its `carnivory` is at least `HERBIVORE_MAX` and its mass clears a multiple of
+the target's. That multiple is `PREY_SIZE_RATIO` (1.3) for anything below
+`CARNIVORE_MIN` and falls linearly to `PREY_SIZE_RATIO_SPECIALIST` (0.55) at pure
+carnivory, so a dedicated carnivore can tackle prey up to ~1.8× its own mass while
+a marginal hunter must outweigh its prey; a fellow predator is dangerous prey and
+always needs the full 1.3 margin, so the widened reach cannot turn the predator
+band into cannibals. The trophic class shown in the menu is derived
 from `carnivory` (`< 0.34` Herbivore, `< 0.66` Omnivore, else Carnivore). A plant
-meal is a small fixed yield, `(1 - carnivory)` of `eatGain`, the same for a mouse
-and an elephant; a kill transfers the prey's stored energy, scaled by
-`carnivory`, so predation moves energy rather than minting it and the crop is the
-ecosystem's only influx. Upkeep scales with `size^0.75` (Kleiber-like), so body
-size is a real cost — met by eating more, or bigger prey, not a bigger mouthful
-of grass. Metabolism is a trade-off rather than a free saving: a high rate burns
+meal is a small fixed yield, `(1 - carnivory)^3` of `eatGain`, the same for a mouse
+and an elephant: the exponent is a mixed gut's assimilation penalty, and it is what
+keeps the omnivore band — which keeps a kill channel *and* a grazing channel — from
+being the single best strategy on every seed. A kill transfers the prey's stored
+energy, scaled by
+`carnivory` and by the run's per-seed `huntEfficiency` (at most 1), so predation
+moves energy rather than minting it and the crop is the
+ecosystem's only influx. Upkeep is `metabolism * size^0.75` (Kleiber-like) plus
+`vision * VISION_UPKEEP`, so both body size and a sharp eye are real costs — met by
+eating more, or bigger prey, not a bigger mouthful of grass. Metabolism is a
+trade-off rather than a free saving: a high rate burns
 energy but lowers the energy a creature must bank before it breeds, while a low
 rate is cheap to keep but breeds later, so neither extreme sweeps the gene pool
 and upkeep keeps the population bounded by primary production. Offspring recombine both parents' genomes and mutate, so
@@ -71,7 +78,11 @@ rebuilds through Autumn and the first half of Winter. The snow line carries a
 static per-cell jitter (`SNOW_EDGE_AMPLITUDE`), so it melts back as a ragged,
 terrain-like edge instead of a smooth isotherm. Each creature's genome carries a
 survival band it dies outside of and a narrower comfort band it walks toward when
-it drifts out of it. The toolbar shows the current season; the menu's World
+it drifts out of it. Each seed also draws its own environmental profile from a
+dedicated stream — never the run's own `rng`, so a seed still reproduces its exact
+history — a `huntEfficiency` (the fraction of a carcass a predator can use,
+0.55–1.0) and a `seasonAmplitude` (0.10–0.26, so harsh worlds swing harder);
+`npm run sim --json` reports both per run. The toolbar shows the current season; the menu's World
 section shows the mean temperature and the current offset.
 
 ## Run
@@ -111,6 +122,16 @@ budget and a truncated series is always a failing one. Presets: `survival`, `tro
 (`trophicClasses` back to 3 after `TROPHIC_WARMUP_TICKS`, because the omnivore band can only
 appear by mutation) and `speciation`.
 
+`--check trophic-mix` is a *seed-set* check rather than a per-seed assertion: it is evaluated
+once over every run and needs at least three seeds. It asserts that all three trophic classes
+hold at least 5% of the final population on every seed, that no seed ends above 70% herbivore,
+that the final carnivore share spans at least 0.10 across the seeds, and that the class gaining
+most share between tick 1000 and the end is not the same on more than two thirds of them.
+
+```bash
+npm run sim -- --ticks 6000 --seeds 1..8,12345 --every 250 --jobs 8 --check trophic-mix --check survival
+```
+
 ## Controls
 
 The world boots **paused** with a freshly generated seed.
@@ -135,7 +156,7 @@ backing store; the canvas is integer-upscaled with `image-rendering: pixelated`.
 | `src/lib/palette.ts` | biome/food ids, colors, densities, biome eligibility — single source of truth for cell values |
 | `src/lib/rng.ts`, `noise.ts`, `terrain.ts`, `climate.ts`, `food.ts`, `genetics.ts`, `names.ts`, `species.ts`, `creatures.ts` | pure, DOM-free simulation core (runs under plain `node`): terrain, the season clock, food regrowth, the genome operators, the seeded name generator, the founder/species registry and the creature agents |
 | `src/lib/world.ts` | all simulated state + one tick; no canvas, DOM or UI coupling |
-| `src/lib/simrun.ts` | headless long-run harness: the metric sampling, the assertion grammar, `runSeed` (the only run loop) and the presets |
+| `src/lib/simrun.ts` | headless long-run harness: the metric sampling, the assertion grammar, `runSeed` (the only run loop), the presets and the cross-seed `trophic-mix` check |
 | `src/lib/simrun.test.ts` | tests for the harness itself: parsing, aggregation, fail-fast, metric soundness, sampling that does not perturb a run |
 | `scripts/sim.ts`, `scripts/sim-worker.ts` | `npm run sim` CLI and its one-seed-per-thread worker entry |
 | `src/lib/sim.test.ts` | headless tests over `World`: creature bookkeeping, hunting, the unified edibility rule, size/carnivory tradeoffs, seeded species names, determinism, caps, speciation and extinction, a 5000-tick ecosystem survival run |

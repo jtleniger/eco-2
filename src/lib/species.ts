@@ -1,4 +1,10 @@
-import { MAX_SPECIES, PREY_SIZE_RATIO, SPECIATION_DISTANCE } from './config.ts';
+import {
+  CARNIVORE_MIN,
+  MAX_SPECIES,
+  PREY_SIZE_RATIO,
+  PREY_SIZE_RATIO_SPECIALIST,
+  SPECIATION_DISTANCE,
+} from './config.ts';
 import {
   GENE,
   GENE_COUNT,
@@ -231,7 +237,11 @@ export function dietLabel(mask: number): string {
 /** Description of the creatures a predator can eat, or `''` for a Herbivore. */
 export function preyLabel(carnivory: number, size: number): string {
   if (dietClassOf(carnivory) === 'Herbivore') return '';
-  return `creatures under ${(size / PREY_SIZE_RATIO).toFixed(1)}`;
+  // The same ratio `canEatCreature` uses against an ordinary (non-predator) prey, so the menu
+  // does not lie about what this species can kill.
+  const t = carnivory <= CARNIVORE_MIN ? 0 : (carnivory - CARNIVORE_MIN) / (1 - CARNIVORE_MIN);
+  const ratio = PREY_SIZE_RATIO + (PREY_SIZE_RATIO_SPECIALIST - PREY_SIZE_RATIO) * t;
+  return `creatures under ${(size / ratio).toFixed(1)}`;
 }
 
 /** First `generateName` (Title-cased) not already used by a species. */

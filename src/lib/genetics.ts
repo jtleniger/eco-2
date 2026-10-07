@@ -50,7 +50,12 @@ export const GENES: readonly GeneSpec[] = [
   { min: -0.15, max: 0.65, step: 0.02, integer: false }, // comfortMin
   { min: 0.25, max: 1.05, step: 0.02, integer: false }, // comfortMax
   { min: 0.4, max: 6, step: 0.06, integer: false }, // size (mass)
-  { min: 0, max: 1, step: 0.04, integer: false }, // carnivory
+  // Diet breadth carries more standing variation than the other continuous genes (0.04 -> 0.08).
+  // The trophic classes are thirds of this axis and the equilibrium distribution is a single hump
+  // of sd ~0.075, so with the older step the mode sits ~1.5 sd from each band edge and the outer
+  // bands hold only 3-7% of the population. Doubling the step widens the hump enough that both
+  // outer bands clear the 5% viability floor.
+  { min: 0, max: 1, step: 0.08, integer: false }, // carnivory
 ];
 
 export type DietClass = 'Herbivore' | 'Omnivore' | 'Carnivore';

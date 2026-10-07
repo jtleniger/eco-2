@@ -6,6 +6,7 @@ import {
   FOUNDER_GROUP,
   FOUNDER_MIN_FOOD_DENSITY,
   GRID,
+  GRAZE_CURVE,
   H,
   HERBIVORE_MAX,
   MATING_ENERGY_FRACTION,
@@ -16,10 +17,12 @@ import {
   METABOLISM_REPRO_REF,
   MIN_HABITAT_AREA,
   PREY_SIZE_RATIO,
+  PREY_SIZE_RATIO_SPECIALIST,
   RARE_MATING_RADIUS,
   RARE_SPECIES_COUNT,
   SHALLOW_WATER_CROSS_SIZE,
   SPECIATION_DISTANCE,
+  VISION_UPKEEP,
   W,
 } from './config.ts';
 import { BIOME_COUNT, Biome, FOODS, FOODS_BY_BIOME, LAND_MASK, NONE } from './palette.ts';
@@ -223,18 +226,31 @@ export class Population {
     return ((this.biomeMask[i] >>> b) & 1) === 1 || this.canCross(i, b);
   }
 
+  /**
+   * Body-mass ratio slot `i`'s prey must clear: `i` may kill `j` only while
+   * `massOf(i) >= massOf(j) * preyMassRatio(i, j's carnivory)`. Only a dedicated carnivore
+   * (`carnivory >= CARNIVORE_MIN`) gets the widened pack-hunting reach, falling linearly to
+   * `PREY_SIZE_RATIO_SPECIALIST` at pure carnivory; every creature below that still needs the
+   * full `PREY_SIZE_RATIO` margin, so the omnivore band keeps its grazing channel without also
+   * gaining a hunting edge (measured: any bonus inside that band collapses every seed to an
+   * omnivore monoculture). A fellow predator is dangerous prey and always needs the full margin,
+   * so the widened rule cannot turn the predator band into cannibals. Hoisted so `findTarget`
+   * computes the (at most two) ratios once per call, not once per scanned cell.
+   */
+  private preyMassRatio(i: number, preyCarnivory: number): number {
+    const carnivory = this.genes[i * GENE_COUNT + GENE.carnivory];
+    const t = carnivory <= CARNIVORE_MIN ? 0 : (carnivory - CARNIVORE_MIN) / (1 - CARNIVORE_MIN);
+    let ratio = PREY_SIZE_RATIO + (PREY_SIZE_RATIO_SPECIALIST - PREY_SIZE_RATIO) * t;
+    if (preyCarnivory >= HERBIVORE_MAX) ratio = Math.max(ratio, PREY_SIZE_RATIO);
+    return ratio;
+  }
+
   /** Creatures slot `i` may kill: it hunts, and `j` is small enough for its carnivory. */
   private canEatCreature(i: number, j: number, biome: Uint8Array): boolean {
     if (j < 0 || j === i || this.dead[j]) return false;
-    const o = i * GENE_COUNT;
-    const carnivory = this.genes[o + GENE.carnivory];
-    if (carnivory < HERBIVORE_MAX) return false;
-    // A dedicated carnivore can tackle prey near its own size; a marginal hunter needs a big
-    // edge. Rewards carnivory, and stops prey becoming invulnerable by maxing body size —
-    // with a flat ratio an arms race pushed herbivores to the size ceiling, where nothing
-    // could eat them and every seed ended herbivore-only.
-    const ratio = 1 + (PREY_SIZE_RATIO - 1) * (1 - carnivory);
-    if (this.massOf(i) < this.massOf(j) * ratio) return false;
+    if (this.genes[i * GENE_COUNT + GENE.carnivory] < HERBIVORE_MAX) return false;
+    const preyCarnivory = this.genes[j * GENE_COUNT + GENE.carnivory];
+    if (this.massOf(i) < this.massOf(j) * this.preyMassRatio(i, preyCarnivory)) return false;
     return this.canEnter(i, biome[this.pos[j]]);
   }
 
@@ -274,6 +290,12 @@ export class Population {
     const cx = this.pos[i] % W;
     const cy = (this.pos[i] / W) | 0;
     const r2 = vision * vision;
+    // A hunter's own mass and the two ratios its prey must clear (one for a non-predator, the
+    // full margin for a fellow predator) do not change while it scans, so all are hoisted: the
+    // per-cell test is a compare and one multiply, not a gene read plus a divide per candidate.
+    const myMass = hunter ? this.massOf(i) : 0;
+    const preyRatio = hunter ? this.preyMassRatio(i, HERBIVORE_MAX - 1) : 0;
+    const predatorRatio = hunter ? this.preyMassRatio(i, 1) : 0;
     let plant = -1;
     let plantD = r2 + 1;
     let prey = -1;
@@ -288,9 +310,15 @@ export class Population {
         const x = cx + dx;
         if (x < 0 || x >= W) continue;
         const cell = y * W + x;
-        if (d2 < preyD && this.canEatCreature(i, this.occupant[cell], biome)) {
-          prey = cell;
-          preyD = d2;
+        if (hunter && d2 < preyD) {
+          const j = this.occupant[cell];
+          if (j >= 0 && j !== i && !this.dead[j]) {
+            const ratio = this.genes[j * GENE_COUNT + GENE.carnivory] >= HERBIVORE_MAX ? predatorRatio : preyRatio;
+            if (myMass >= this.massOf(j) * ratio && this.canEnter(i, biome[this.pos[j]])) {
+              prey = cell;
+              preyD = d2;
+            }
+          }
         }
         if (d2 < plantD && this.canEatPlant(i, food[cell])) {
           plant = cell;
@@ -391,7 +419,14 @@ export class Population {
    * bounded by primary production. Upkeep still scales with `size^METABOLIC_EXP`, so body size
    * is a real cost, met by eating more or bigger prey, not by a bigger mouthful of grass.
    */
-  private eat(i: number, biome: Uint8Array, food: Uint8Array, foodCounts: Uint32Array, displaced: number): void {
+  private eat(
+    i: number,
+    biome: Uint8Array,
+    food: Uint8Array,
+    foodCounts: Uint32Array,
+    displaced: number,
+    huntEfficiency = 1,
+  ): void {
     const o = i * GENE_COUNT;
     const cell = this.pos[i];
     const carnivory = this.genes[o + GENE.carnivory];
@@ -400,15 +435,22 @@ export class Population {
     if (this.canEatPlant(i, e)) {
       foodCounts[e]--;
       food[cell] = NONE;
-      // Grazing yield falls off as the diet shifts toward carnivory.
-      this.energy[i] = Math.min(maxEnergy, this.energy[i] + this.genes[o + GENE.eatGain] * (1 - carnivory));
+      // Grazing yield is an assimilation efficiency: a dedicated grazer gets the full meal, a
+      // mixed gut digests foliage progressively worse (see `GRAZE_CURVE`).
+      this.energy[i] = Math.min(
+        maxEnergy,
+        this.energy[i] + this.genes[o + GENE.eatGain] * (1 - carnivory) ** GRAZE_CURVE,
+      );
     }
     let j = this.occupant[cell];
     if (j < 0 || j === i) j = displaced;
     if (this.canEatCreature(i, j, biome)) {
       const preyEnergy = this.energy[j];
       this.dead[j] = 1; // swept later; never remove another slot mid-loop
-      this.energy[i] = Math.min(maxEnergy, this.energy[i] + preyEnergy * carnivory);
+      // A kill transfers the prey's stored energy scaled by `carnivory` (how much of the carcass
+      // the hunter can use) and by the run's per-seed `huntEfficiency` (at most 1, so a kill
+      // still only moves energy and never mints it).
+      this.energy[i] = Math.min(maxEnergy, this.energy[i] + preyEnergy * carnivory * huntEfficiency);
     }
   }
 
@@ -525,6 +567,7 @@ export class Population {
     tempOffset: number,
     registry: SpeciesRegistry,
     tick: number,
+    huntEfficiency = 1,
   ): void {
     this.mated.fill(0, 0, this.count);
     let i = 0;
@@ -536,7 +579,9 @@ export class Population {
       const o = i * GENE_COUNT;
       const s = this.species[i];
       this.age[i]++;
-      this.energy[i] -= this.genes[o + GENE.metabolism] * Math.pow(this.massOf(i), METABOLIC_EXP);
+      this.energy[i] -=
+        this.genes[o + GENE.metabolism] * Math.pow(this.massOf(i), METABOLIC_EXP) +
+        this.genes[o + GENE.vision] * VISION_UPKEEP;
       if (this.energy[i] <= 0 || this.age[i] >= this.genes[o + GENE.maxAge]) {
         this.dead[i] = 1;
         this.remove(i, registry, tick);
@@ -585,7 +630,7 @@ export class Population {
       // capability, and can name biomes no member ever stands on.
       registry.habitat[s] |= 1 << biome[this.pos[i]];
 
-      this.eat(i, biome, food, foodCounts, displaced);
+      this.eat(i, biome, food, foodCounts, displaced, huntEfficiency);
 
       if (
         this.energy[i] >= this.reproNeed(i) &&

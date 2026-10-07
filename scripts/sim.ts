@@ -5,10 +5,16 @@ import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import {
   PRESETS,
+  TROPHIC_FAVOURED_FROM,
+  TROPHIC_MAX_FAVOURED_FRACTION,
+  TROPHIC_MAX_HERBIVORE_SHARE,
+  TROPHIC_MIN_CARNIVORE_SPREAD,
+  TROPHIC_MIN_SHARE,
   assertionMeasure,
   evaluateAssertion,
   parseAssertion,
   sampleWorld,
+  trophicMixVerdict,
   type Assertion,
   type Sample,
 } from '../src/lib/simrun.ts';
@@ -26,6 +32,11 @@ interface Verdict {
   expr: string;
   pass: boolean;
   failures: { seed: number; detail: string }[];
+  /**
+   * Set only for a seed-set check (`trophic-mix`): its single summary line, since the check is
+   * evaluated once over every run rather than per seed and so has no per-seed failure rows.
+   */
+  detail?: string;
 }
 
 type WorkerMessage =
@@ -46,6 +57,12 @@ function helpText(): string {
   const presets = Object.keys(PRESETS)
     .map((name) => `  ${name.padEnd(12)}${PRESETS[name].join('; ')}`)
     .join('\n');
+  const seedSet = [
+    `viable(herbivoreShare,omnivoreShare,carnivoreShare) >= ${TROPHIC_MIN_SHARE}`,
+    `max(herbivoreShare) <= ${TROPHIC_MAX_HERBIVORE_SHARE}`,
+    `spread(carnivoreShare) >= ${TROPHIC_MIN_CARNIVORE_SPREAD}`,
+    `favouredClass (largest share gain from tick ${TROPHIC_FAVOURED_FROM}) is not the same class on more than ${TROPHIC_MAX_FAVOURED_FRACTION.toFixed(2)} of seeds`,
+  ];
   return `eco-2 sim — fast-forward the simulation headless and check a claim over time
 
 ${USAGE}
@@ -72,6 +89,9 @@ assertion grammar (whitespace-tolerant):
 
 presets:
 ${presets}
+
+seed-set checks (evaluated once over every seed, need >= 3 seeds):
+  ${'trophic-mix'.padEnd(12)}${seedSet.join('; ')}
 
 metrics (${metrics.length}):
   ${metrics.join(', ')}
@@ -262,9 +282,18 @@ function main(): void {
   jobs = Math.min(jobs, seeds.length);
 
   const exprs: string[] = [];
+  let trophicMix = false;
   for (const name of checks) {
+    // `trophic-mix` is a seed-set check, not a per-seed assertion list: it is evaluated once
+    // over every finished run below, not parsed into an `Assertion` for the workers.
+    if (name === 'trophic-mix') {
+      trophicMix = true;
+      continue;
+    }
     if (!Object.hasOwn(PRESETS, name)) {
-      usageError(`--check: unknown preset "${name}" (have: ${Object.keys(PRESETS).join(', ')})`);
+      usageError(
+        `--check: unknown preset "${name}" (have: ${[...Object.keys(PRESETS), 'trophic-mix'].join(', ')})`,
+      );
     }
     for (const expr of PRESETS[name]) exprs.push(expr);
   }
@@ -310,9 +339,16 @@ function main(): void {
         }
         return { expr: a.expr, pass: failures.length === 0, failures };
       });
+      if (trophicMix) {
+        for (const v of trophicMixVerdict(reports)) {
+          verdicts.push({ expr: v.expr, pass: v.pass, failures: [], detail: v.detail });
+        }
+      }
       const failedSeeds = new Set<number>();
       for (const verdict of verdicts) for (const failure of verdict.failures) failedSeeds.add(failure.seed);
-      const pass = failedSeeds.size === 0;
+      // A seed-set verdict fails without naming a seed, so the overall result is the conjunction
+      // of every verdict, not merely "some seed failed".
+      const pass = verdicts.every((verdict) => verdict.pass);
 
       if (json) {
         process.stdout.write(
@@ -345,12 +381,24 @@ function main(): void {
 
       process.stdout.write('\n');
       verdicts.forEach((verdict, index) => {
+        // A seed-set verdict carries its own summary line; a per-seed assertion names the seed
+        // closest to failing.
+        const seedSet = verdict.detail !== undefined;
+        const kind = seedSet ? 'check' : 'assert';
         if (verdict.pass) {
-          const worst = worstSeed(assertions[index], reports);
-          process.stdout.write(`assert ${verdict.expr}  PASS  all seeds (worst seed ${worst.seed}: ${worst.detail})\n`);
+          const worst = seedSet ? null : worstSeed(assertions[index], reports);
+          const summary =
+            worst === null
+              ? String(verdict.detail)
+              : `all seeds (worst seed ${worst.seed}: ${worst.detail})`;
+          process.stdout.write(`${kind} ${verdict.expr}  PASS  ${summary}\n`);
           return;
         }
-        process.stdout.write(`✘ assert ${verdict.expr}  FAIL\n`);
+        process.stdout.write(`✘ ${kind} ${verdict.expr}  FAIL\n`);
+        if (seedSet) {
+          process.stdout.write(`    ${String(verdict.detail)}\n`);
+          return;
+        }
         for (const failure of verdict.failures) {
           process.stdout.write(`    seed ${failure.seed}: ${failure.detail}\n`);
         }

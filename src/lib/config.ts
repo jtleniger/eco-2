@@ -28,7 +28,12 @@ export const FOUNDER_CLUSTER_R = 4; // Chebyshev radius of a founder cluster; 2R
 // cannot graze at all. Excludes Snow/Desert/Mountain (<=0.02); keeps Water (0.045), Forest and
 // Swamp (0.04) and Fields (0.055).
 export const FOUNDER_MIN_FOOD_DENSITY = 0.04;
-export const MAX_SPECIES = 256; // species id ceiling; at the cap, classify assigns to the nearest existing species
+// Species id ceiling; at the cap, classify assigns to the nearest existing species instead of
+// founding one. 256 pinned on every long run (the test seed reaches it by ~4000 ticks), which
+// both stopped speciation and forced classify into its O(count) nearest-species scan per birth.
+// 1024 leaves headroom: speciesTotal reaches ~500-700 after 12000 ticks. The only O(MAX_SPECIES)
+// loops (sampleWorld, assertPopulationSound) stay cheap at this size.
+export const MAX_SPECIES = 1024;
 // Genome distance a lineage must exceed to found a new species (also the mating barrier). The
 // old 13-gene balance speciated off single categorical jumps; with only two masks left a jump
 // tops out near 0.2, so the barrier is retuned to keep ~15 species after 12000 ticks on the
@@ -60,7 +65,28 @@ export const MUTATION_PROB_CATEGORICAL = 0.002; // chance to flip one bit of eac
 export const HERBIVORE_MAX = 0.34; // carnivory gene below this: Herbivore (eats plants only)
 export const CARNIVORE_MIN = 0.66; // carnivory gene at or above this: Carnivore (eats creatures only)
 export const PREY_SIZE_RATIO = 1.3; // a predator must outweigh its prey by this factor
+// The ratio a *dedicated* carnivore needs: lower, so it can tackle prey up to ~1/0.55 = 1.8x its
+// own mass (pack-hunting); a marginal hunter still needs to outweigh its prey. Without it, prey
+// max out `size` for immunity (a size-6 prey needs a 7-8 mass predator, above the cap) and every
+// seed ends herbivore-only. It applies only at or above `CARNIVORE_MIN`: widening the ratio
+// *inside* the omnivore band (measured with a linear and a cubic ramp) made omnivory the single
+// best strategy and collapsed all nine seeds to 86-96% omnivore with ~4% carnivore, because a
+// mid-band creature then got both the full grazing channel and a usable kill channel.
+export const PREY_SIZE_RATIO_SPECIALIST = 0.55;
+// A plant meal is `eatGain * (1 - carnivory)^GRAZE_CURVE`. With a linear fall (curve 1) the
+// omnivore's grazing loss was proportional to its carnivory, so a mid-band creature paid little
+// for grazing and gained the whole kill channel: measured, every configuration then settled at
+// 82-96% omnivore and the mode ignored the environment entirely (carnivory 0.51-0.53 on all nine
+// seeds whatever the plant quality). A quadratic assimilation penalty (a mixed gut digests
+// foliage worse) gives `carnivory` a genuine interior optimum whose position moves with plant
+// quality, so a lush seed favours grazers and a lean one favours hunters.
+export const GRAZE_CURVE = 3;
 export const METABOLIC_EXP = 0.75; // upkeep scales as size^METABOLIC_EXP (Kleiber-like)
+// Energy per tick per unit of `vision`. Vision otherwise appears only in `findTarget`'s scan
+// bounds, so selection drove it to its maximum (12) and every step scanned ~450 cells: the
+// single biggest cost in the whole tick and a gene with no trade-off. A small upkeep makes a
+// sharp eye a real expense, so it stays near the founders' 8 and the scan stays bounded.
+export const VISION_UPKEEP = 0.04;
 // Metabolism is a trade-off, not a free saving: a creature at this rate reproduces at the base
 // `reproEnergy * MATING_ENERGY_FRACTION` threshold, a higher rate lowers the energy it must bank
 // (breeds sooner) and a lower rate raises it (breeds later, capped at `maxEnergy` so it is never
@@ -80,7 +106,21 @@ export const TEMP_ALT_PENALTY = 1.2; // temperature lost per unit elevation > 0.
 export const SNOW_EDGE_FREQ = 8; // snow-line jitter frequency, as a multiple of FREQ
 export const SNOW_EDGE_AMPLITUDE = 0.09; // temperature jitter along the snow line, deg C
 export const SEASON_PERIOD_TICKS = 3600; // one warm/cool year; 6 min at 1x (10 ticks/s)
-export const SEASON_AMPLITUDE = 0.12; // +/- temperature offset over a year
+export const SEASON_AMPLITUDE = 0.12; // +/- temperature offset over a year; the default the climate tests pin
+// Per-seed environmental profile, derived from the seed (see `World.reset`) rather than from the
+// run's own rng, so it cannot perturb the run or break the determinism test.
+// `huntEfficiency` is the fraction of a carcass a predator can use. It is the one per-seed knob
+// that moves the diet optimum: scaling the *plant* channel does not, because the prey's stored
+// energy (the kill channel) scales with it too, so the ratio of the two channels stays put
+// (measured: plant quality 0.71-1.20 moved the mean carnivory only 0.44 -> 0.49). Scaling the
+// kill channel's extraction moves that ratio directly, so a lean seed (tough, poorly digestible
+// prey) favours pure carnivores and a rich one favours grazers and omnivores. It never exceeds 1,
+// so a kill still only moves energy and never mints it. `seasonAmplitude` is the per-seed
+// temperature swing: a harsh seed crashes grazers in winter.
+export const HUNT_EFFICIENCY_MIN = 0.55;
+export const HUNT_EFFICIENCY_MAX = 1.0;
+export const SEASON_AMPLITUDE_MIN = 0.10;
+export const SEASON_AMPLITUDE_MAX = 0.26;
 export const CLIMATE_STEP_TICKS = 30; // recompute biomes every 3 s at 1x
 export const P_LOW = 0.02; // percentile-normalization clip points
 export const P_HIGH = 0.98;
